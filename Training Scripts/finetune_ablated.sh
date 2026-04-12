@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+############################################
+# Fine-tune ablated models on the sentences
+# that were removed during corpus ablation.
+#
+# Usage:
+#   bash finetune_ablated.sh
+#
+# Prerequisites:
+#   • The ablated models must already be trained and pushed to HuggingFace:
+#       znhoughton/opt-babylm-{size}-ablated-20eps-seed{SEED}
+#   • The removed-sentences dataset must be pushed to HuggingFace:
+#       znhoughton/babylm-some-binoms-ablated
+#     (created by ablate_corpus.py --push-removed-to-hub znhoughton/babylm-some-binoms-ablated)
+############################################
+
+REMOVED_DATASET="znhoughton/babylm-some-binoms-ablated"
+TOKENIZER_NAME="opt-babylm-100m-bpe"
+BLOCK_SIZE=1024
+WARMUP_STEPS=200
+SEED=964
+
+TOKENIZER_PATH="models/${TOKENIZER_NAME}"
+
+############################################
+# FUNCTION: fine-tune one ablated OPT model
+############################################
+finetune_opt () {
+    MODEL_SIZE=$1
+    BATCH=$2
+    GRAD_ACCUM=$3
+    LR=$4
+
+    BASE_MODEL_ID="znhoughton/opt-babylm-${MODEL_SIZE}-ablated-20eps-seed${SEED}"
+    FINETUNE_NAME="opt-babylm-${MODEL_SIZE}-ablated-finetuned-20eps"
+    RUN_DIR="runs/${FINETUNE_NAME}_${SEED}"
+
+    echo "============================================================"
+    echo "=== Fine-tuning ${FINETUNE_NAME} ==="
+    echo "=== Base model : ${BASE_MODEL_ID} ==="
+    echo "=== Dataset    : ${REMOVED_DATASET} ==="
+    echo "============================================================"
+
+    CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_autoreg.py \
+        --model_type opt \
+        --model_name_or_path ${BASE_MODEL_ID} \
+        --tokenizer_name ${TOKENIZER_PATH} \
+        --dataset_name ${REMOVED_DATASET} \
+        --do_train \
+        --bf16 \
+        --gradient_checkpointing \
+        --block_size ${BLOCK_SIZE} \
+        --per_device_train_batch_size ${BATCH} \
+        --gradient_accumulation_steps ${GRAD_ACCUM} \
+        --learning_rate ${LR} \
+        --warmup_steps ${WARMUP_STEPS} \
+        --num_train_epochs 3 \
+        --save_strategy epoch \
+        --save_total_limit 1 \
+        --save_only_model \
+        --logging_steps 10 \
+        --report_to tensorboard \
+        --seed ${SEED} \
+        --output_dir ${RUN_DIR} \
+        --push_to_hub \
+        --hub_model_id znhoughton/${FINETUNE_NAME}-seed${SEED} \
+        --hub_strategy end \
+        --ddp_find_unused_parameters False
+
+    echo "=== Finished fine-tuning ${FINETUNE_NAME} ==="
+    echo "=== Deleting local run directory ${RUN_DIR} ==="
+    rm -rf "${RUN_DIR}"
+}
+
+############################################
+# OPT-125M
+############################################
+finetune_opt \
+  125m \
+  400 \
+  1 \
+  3e-5
+
+############################################
+# OPT-350M
+############################################
+finetune_opt \
+  350m \
+  200 \
+  1 \
+  1e-5
+
+############################################
+# OPT-1.3B
+############################################
+finetune_opt \
+  1.3b \
+  100 \
+  1 \
+  1e-5

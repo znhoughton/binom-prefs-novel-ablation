@@ -1,0 +1,7 @@
+# HuggingFace dataset cache — stored on HuggingFace Hub, not GitHub
+Data/ablated_corpus/
+Data/removed_sentences/
+
+# Large checkpoint file
+Data/checkpoint.json
+Data/c4_checkpoint.json
