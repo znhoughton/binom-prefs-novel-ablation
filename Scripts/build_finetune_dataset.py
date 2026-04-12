@@ -91,6 +91,8 @@ def main():
                         default=str(PROJECT_ROOT / "Data" / "binomial_sentences_pool.csv"))
     parser.add_argument("--output-corpus",
                         default=str(PROJECT_ROOT / "Data" / "finetune_corpus.csv"))
+    parser.add_argument("--output-binomial-sents",
+                        default=str(PROJECT_ROOT / "Data" / "finetune_binomial_sentences.csv"))
     parser.add_argument("--freq-log",
                         default=str(PROJECT_ROOT / "Data" / "frequency_log.csv"))
     parser.add_argument("--seed", type=int, default=42)
@@ -253,10 +255,20 @@ def main():
         for sent in all_sents:
             w.writerow({"text": sent})
 
+    # Binomial-only sentences (finetune_corpus minus background)
+    binomial_only = finetune_sents.copy()
+    random.shuffle(binomial_only)
+    with open(args.output_binomial_sents, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["text"])
+        w.writeheader()
+        for sent in binomial_only:
+            w.writerow({"text": sent})
+
     print(f"\nDone.")
-    print(f"  Sentence pool    → {args.output_pool}")
-    print(f"  Fine-tune corpus → {args.output_corpus}")
-    print(f"  Frequency log    → {args.freq_log}")
+    print(f"  Sentence pool      → {args.output_pool}")
+    print(f"  Binomial sentences → {args.output_binomial_sents}")
+    print(f"  Fine-tune corpus   → {args.output_corpus}")
+    print(f"  Frequency log      → {args.freq_log}")
 
 
 if __name__ == "__main__":
