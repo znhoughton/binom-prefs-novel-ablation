@@ -2,6 +2,11 @@
 Data/ablated_corpus/
 Data/removed_sentences/
 
-# Large checkpoint file
+# Large C4-derived files
+Data/background_sentences.csv
+Data/c4_binomial_sentences.csv
+Data/finetune_corpus.csv
+
+# Checkpoints
 Data/checkpoint.json
 Data/c4_checkpoint.json
