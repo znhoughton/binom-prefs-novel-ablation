@@ -5,52 +5,92 @@ Stream the English C4 corpus from HuggingFace and count how many times each
 N-and-N binomial pair appears as an exact 3-word sequence ("w1 and w2" or
 "w2 and w1", case-insensitive, whole-word matches).
 
-Also writes a sentences file with every sentence that contains a match,
-labelled by pair and ordering — useful for later fine-tuning on specific
-binomial sentences.
+Also writes a sentences file with every document that contains a match,
+labelled by pair and ordering.
 
-Mirrors the output format of check_ngrams.py so results are directly comparable.
+Parallelised across 12 workers, each processing independent C4 shards
+(C4/en has 1024 shards).  Checkpoint tracks completed shards so the run
+can be safely resumed.
 
 Usage
 -----
   python Scripts/check_c4.py
-  python Scripts/check_c4.py --input  Data/novel_binomials_curated.csv
-  python Scripts/check_c4.py --input  Data/novel_binomials_curated.csv \\
-                              --output Data/c4_novel_binomials.csv \\
-                              --all    Data/c4_all_results.csv \\
-                              --sentences Data/c4_binomial_sentences.csv
+  python Scripts/check_c4.py --workers 12
+  python Scripts/check_c4.py --input Data/novel_binomials_curated.csv
 
 Output files
 ------------
-  c4_all_results.csv      – counts for every pair (word1, word2, order1,
-                            order1_count, order2, order2_count, novel)
-  c4_novel_binomials.csv  – pairs where both counts are 0
-  c4_binomial_sentences.csv – one row per matching sentence:
-                              word1, word2, ordering, sentence
-
-Notes
------
-C4 is streamed from HuggingFace (allenai/c4, config "en") so no full download
-is required, but it will take a while — C4/en is ~750 GB uncompressed.
-A checkpoint file is saved after every CHECKPOINT_INTERVAL documents so the
-run can be resumed if interrupted.  The sentences file is appended to as the
-run progresses, so it is safe to resume without losing collected sentences.
-
-Matching uses regex whole-word boundaries so "bread and butter" matches but
-"cornbread and buttercup" does not.
+  c4_all_results.csv         – counts for every pair
+  c4_novel_binomials.csv     – pairs where both counts are 0
+  c4_binomial_sentences.csv  – word1, word2, ordering, sentence (document text)
 """
 
 import csv
 import json
 import re
+import os
 import sys
 import argparse
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-CHECKPOINT_INTERVAL = 100_000   # save checkpoint every N documents
+C4_TOTAL_SHARDS = 1024   # fixed property of allenai/c4 en train split
+
+# ── module-level worker state (set once per process via initializer) ──────────
+
+_worker_pattern_strings = None   # {target: regex_string}
+_worker_target_to_pair  = None   # {target: (w1, w2)}
+_worker_patterns        = None   # compiled after init
+
+def _init_worker(pattern_strings, target_to_pair):
+    global _worker_pattern_strings, _worker_target_to_pair, _worker_patterns
+    _worker_pattern_strings = pattern_strings
+    _worker_target_to_pair  = target_to_pair
+    _worker_patterns = {
+        t: re.compile(p, re.IGNORECASE)
+        for t, p in pattern_strings.items()
+    }
+
+
+def _process_shard(shard_index: int) -> tuple:
+    """
+    Worker task: stream one C4 shard and collect counts + matching documents.
+    Returns (shard_index, counts_dict, sentences_list, error_or_None).
+    """
+    from datasets import load_dataset
+
+    url = (f"hf://datasets/allenai/c4/en/"
+           f"c4-train.{shard_index:05d}-of-01024.json.gz")
+
+    counts    = defaultdict(int)
+    sentences = []
+    n_docs    = 0
+
+    try:
+        dataset = load_dataset("json", data_files=[url],
+                               split="train", streaming=True)
+        for example in dataset:
+            n_docs += 1
+            text = example.get("text", "")
+            if text and "and" in text.lower():
+                for target, pat in _worker_patterns.items():
+                    if pat.search(text):
+                        counts[target] += 1
+                        w1, w2 = _worker_target_to_pair[target]
+                        sentences.append({
+                            "word1":    w1,
+                            "word2":    w2,
+                            "ordering": target,
+                            "sentence": text.strip(),
+                        })
+    except Exception as e:
+        return shard_index, {}, [], str(e), n_docs
+
+    return shard_index, dict(counts), sentences, None, n_docs
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -65,43 +105,24 @@ def read_candidates(path: str) -> list:
     return pairs
 
 
-def build_patterns(pairs: list) -> dict:
-    """
-    Build a dict mapping target string → compiled regex.
-    Each pattern matches the exact 3-word sequence as whole words,
-    case-insensitively.
-
-    Returns {target_string: pattern}, where target_string is e.g. "bread and butter".
-    """
+def build_pattern_strings(pairs: list) -> dict:
+    """Returns {target_string: regex_string} — serialisable for worker init."""
     patterns = {}
     for w1, w2 in pairs:
         for t in (f"{w1} and {w2}", f"{w2} and {w1}"):
             if t not in patterns:
                 w1t, _, w2t = t.split(" ")
-                patterns[t] = re.compile(
-                    rf"\b{re.escape(w1t)}\b\s+\band\b\s+\b{re.escape(w2t)}\b",
-                    re.IGNORECASE,
-                )
+                patterns[t] = (rf"\b{re.escape(w1t)}\b\s+\band\b"
+                               rf"\s+\b{re.escape(w2t)}\b")
     return patterns
 
 
 def build_target_to_pair(pairs: list) -> dict:
-    """Map each target string back to its (word1, word2) for labelling."""
     mapping = {}
     for w1, w2 in pairs:
         mapping[f"{w1} and {w2}"] = (w1, w2)
         mapping[f"{w2} and {w1}"] = (w1, w2)
     return mapping
-
-
-def split_sentences(text: str) -> list:
-    """Split text into sentences using NLTK."""
-    try:
-        from nltk import sent_tokenize
-        return sent_tokenize(text)
-    except Exception:
-        # Fallback: split on ". " if NLTK unavailable
-        return [s.strip() for s in text.split(". ") if s.strip()]
 
 
 def write_results(results: list, all_path: str, novel_path: str):
@@ -125,140 +146,112 @@ def write_results(results: list, all_path: str, novel_path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Count N-and-N binomial occurrences in the C4 corpus (streamed)."
+        description="Count N-and-N binomial occurrences in C4 (parallelised by shard)."
     )
     parser.add_argument("--input",
-                        default=str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv"),
-                        help="CSV of binomial pairs (word1, word2 columns).")
+                        default=str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv"))
     parser.add_argument("--output",
-                        default=str(PROJECT_ROOT / "Data" / "c4_novel_binomials.csv"),
-                        help="Output CSV of novel pairs (count = 0 for both orderings).")
+                        default=str(PROJECT_ROOT / "Data" / "c4_novel_binomials.csv"))
     parser.add_argument("--all",
-                        default=str(PROJECT_ROOT / "Data" / "c4_all_results.csv"),
-                        help="Output CSV with counts for all pairs.")
+                        default=str(PROJECT_ROOT / "Data" / "c4_all_results.csv"))
     parser.add_argument("--sentences",
-                        default=str(PROJECT_ROOT / "Data" / "c4_binomial_sentences.csv"),
-                        help="Output CSV of sentences containing each binomial, "
-                             "with word1, word2, ordering, sentence columns.")
+                        default=str(PROJECT_ROOT / "Data" / "c4_binomial_sentences.csv"))
     parser.add_argument("--checkpoint",
-                        default=str(PROJECT_ROOT / "Data" / "c4_checkpoint.json"),
-                        help="Checkpoint file for resuming interrupted runs.")
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Stop after this many documents (useful for testing).")
+                        default=str(PROJECT_ROOT / "Data" / "c4_checkpoint.json"))
+    parser.add_argument("--workers", type=int, default=os.cpu_count(),
+                        help=f"Parallel worker processes (default: {os.cpu_count()}).")
+    parser.add_argument("--limit-shards", type=int, default=None,
+                        help="Stop after this many shards (useful for testing).")
     args = parser.parse_args()
-
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        sys.exit("Run:  pip install datasets")
 
     try:
         from tqdm import tqdm
     except ImportError:
         sys.exit("Run:  pip install tqdm")
 
-    # Ensure NLTK punkt is available for sentence splitting
-    try:
-        import nltk
-        for resource in ("punkt", "punkt_tab"):
-            try:
-                nltk.data.find(f"tokenizers/{resource}")
-                break
-            except LookupError:
-                pass
-        else:
-            nltk.download("punkt_tab", quiet=True)
-    except Exception:
-        pass
-
     # ── 1. Load candidates ──────────────────────────────────────────────────
-    pairs = read_candidates(args.input)
-    print(f"Loaded {len(pairs)} candidate pairs from {args.input}")
-
-    patterns        = build_patterns(pairs)
+    pairs           = read_candidates(args.input)
+    pattern_strings = build_pattern_strings(pairs)
     target_to_pair  = build_target_to_pair(pairs)
-    print(f"Compiled {len(patterns)} regex patterns.\n")
+    print(f"Loaded {len(pairs)} candidate pairs → {len(pattern_strings)} patterns.")
 
     # ── 2. Load checkpoint ──────────────────────────────────────────────────
-    checkpoint_path  = Path(args.checkpoint)
-    sentences_path   = Path(args.sentences)
+    checkpoint_path = Path(args.checkpoint)
+    sentences_path  = Path(args.sentences)
 
     if checkpoint_path.exists():
         with open(checkpoint_path, encoding="utf-8") as f:
             ckpt = json.load(f)
-        counts    = defaultdict(int, ckpt.get("counts", {}))
-        docs_done = ckpt.get("docs_done", 0)
-        print(f"Resuming from checkpoint: {docs_done:,} documents already processed.\n")
+        counts         = defaultdict(int, ckpt.get("counts", {}))
+        done_shards    = set(ckpt.get("done_shards", []))
+        docs_per_shard = ckpt.get("docs_per_shard", {})
+        print(f"Resuming: {len(done_shards)}/{C4_TOTAL_SHARDS} shards already done.\n")
     else:
-        counts    = defaultdict(int)
-        docs_done = 0
+        counts         = defaultdict(int)
+        done_shards    = set()
+        docs_per_shard = {}
+
+    total_shards = args.limit_shards or C4_TOTAL_SHARDS
+    remaining    = [i for i in range(total_shards) if i not in done_shards]
+    print(f"Shards remaining: {len(remaining)}  |  Workers: {args.workers}\n")
 
     # Open sentences file for appending (safe to resume)
-    sent_file_exists = sentences_path.exists() and docs_done > 0
-    sentences_f = open(sentences_path, "a", newline="", encoding="utf-8")
-    sent_writer = csv.DictWriter(sentences_f,
-                                 fieldnames=["word1", "word2", "ordering", "sentence"])
-    if not sent_file_exists:
+    sent_file_new = not (sentences_path.exists() and done_shards)
+    sentences_f   = open(sentences_path, "a", newline="", encoding="utf-8")
+    sent_writer   = csv.DictWriter(sentences_f,
+                                   fieldnames=["word1", "word2", "ordering", "sentence"])
+    if sent_file_new:
         sent_writer.writeheader()
 
-    def save_checkpoint(n):
+    def save_checkpoint():
         sentences_f.flush()
         with open(checkpoint_path, "w", encoding="utf-8") as f:
-            json.dump({"counts": dict(counts), "docs_done": n}, f)
+            json.dump({"counts": dict(counts),
+                       "done_shards": sorted(done_shards),
+                       "docs_per_shard": docs_per_shard}, f)
 
-    # ── 3. Stream C4 ────────────────────────────────────────────────────────
-    print("Streaming allenai/c4 (en) from HuggingFace …")
-    print("(This will take a long time — checkpoint saved every "
-          f"{CHECKPOINT_INTERVAL:,} documents)\n")
+    # ── 3. Process shards in parallel ───────────────────────────────────────
+    print(f"Processing {len(remaining)} shards across {args.workers} workers …\n")
 
-    dataset = load_dataset("allenai/c4", "en", split="train", streaming=True)
+    with ProcessPoolExecutor(max_workers=args.workers,
+                             initializer=_init_worker,
+                             initargs=(pattern_strings, target_to_pair)) as pool:
 
-    if docs_done > 0:
-        print(f"Skipping first {docs_done:,} documents …")
-        dataset = dataset.skip(docs_done)
+        futures = {pool.submit(_process_shard, i): i for i in remaining}
 
-    n_docs = docs_done
-    with tqdm(desc="Documents", unit="doc", initial=docs_done,
-              dynamic_ncols=True) as pbar:
-        for example in dataset:
-            text = example.get("text", "")
-            if text:
-                tl = text.lower()
-                if "and" in tl:
-                    # Find which targets match at the document level first
-                    matching_targets = [t for t, pat in patterns.items()
-                                        if pat.search(text)]
-                    if matching_targets:
-                        # Sentence-tokenise once, then check each sentence
-                        sentences = split_sentences(text)
-                        for sent in sentences:
-                            for target in matching_targets:
-                                if patterns[target].search(sent):
-                                    counts[target] += 1
-                                    w1, w2 = target_to_pair[target]
-                                    sent_writer.writerow({
-                                        "word1":    w1,
-                                        "word2":    w2,
-                                        "ordering": target,
-                                        "sentence": sent.strip(),
-                                    })
+        docs_searched = sum(docs_per_shard.get(str(i), 0) for i in done_shards)
 
-            n_docs += 1
-            pbar.update(1)
+        with tqdm(total=total_shards, initial=len(done_shards),
+                  desc="Shards", unit="shard", dynamic_ncols=True) as pbar, \
+             tqdm(total=C4_TOTAL_SHARDS * 356_000, initial=docs_searched,
+                  desc="Documents", unit="doc", unit_scale=True,
+                  dynamic_ncols=True) as doc_pbar:
 
-            if n_docs % CHECKPOINT_INTERVAL == 0:
-                save_checkpoint(n_docs)
-                pbar.write(f"  Checkpoint saved at {n_docs:,} documents.")
+            for fut in as_completed(futures):
+                shard_idx, shard_counts, shard_sentences, err, n_docs = fut.result()
 
-            if args.limit and n_docs >= args.limit:
-                print(f"\nStopped at --limit {args.limit:,} documents.")
-                break
+                if err:
+                    pbar.write(f"  [ERROR] shard {shard_idx:04d}: {err}")
+                else:
+                    for target, n in shard_counts.items():
+                        counts[target] += n
+                    for row in shard_sentences:
+                        sent_writer.writerow(row)
+                    docs_per_shard[str(shard_idx)] = n_docs
+                    doc_pbar.update(n_docs)
+
+                done_shards.add(shard_idx)
+                save_checkpoint()
+                pbar.update(1)
+
+                if shard_sentences:
+                    pbar.write(f"  shard {shard_idx:04d}: "
+                               f"{sum(shard_counts.values())} matches")
 
     sentences_f.close()
-    save_checkpoint(n_docs)
-    print(f"\nFinished. Processed {n_docs:,} documents total.")
+    print(f"\nFinished. {len(done_shards)} shards processed.")
 
-    # ── 4. Build per-pair results ───────────────────────────────────────────
+    # ── 4. Build and write results ───────────────────────────────────────────
     results = []
     for w1, w2 in pairs:
         t1 = f"{w1} and {w2}"
@@ -275,9 +268,8 @@ def main():
             "novel":        c1 == 0 and c2 == 0,
         })
 
-    # ── 5. Write output ─────────────────────────────────────────────────────
     novel = write_results(results, args.all, args.output)
-    print(f"\n{len(novel)}/{len(results)} pairs are novel (count = 0 for both orderings).")
+    print(f"\n{len(novel)}/{len(results)} pairs novel (both counts = 0).")
     print(f"  All results  → {args.all}")
     print(f"  Novel pairs  → {args.output}")
     print(f"  Sentences    → {args.sentences}")
