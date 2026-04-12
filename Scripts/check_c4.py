@@ -30,35 +30,41 @@ import json
 import re
 import os
 import sys
+import time
 import argparse
+import multiprocessing
+import threading
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-C4_TOTAL_SHARDS = 1024   # fixed property of allenai/c4 en train split
+C4_TOTAL_SHARDS  = 1024     # fixed property of allenai/c4 en train split
+C4_TOTAL_DOCS    = 364_868_892   # approximate total documents in C4/en train
+COUNTER_INTERVAL = 500      # worker increments shared counter every N docs
 
 # ── module-level worker state (set once per process via initializer) ──────────
 
-_worker_pattern_strings = None   # {target: regex_string}
-_worker_target_to_pair  = None   # {target: (w1, w2)}
-_worker_patterns        = None   # compiled after init
+_worker_patterns       = None
+_worker_target_to_pair = None
+_worker_doc_counter    = None   # shared multiprocessing.Value
 
-def _init_worker(pattern_strings, target_to_pair):
-    global _worker_pattern_strings, _worker_target_to_pair, _worker_patterns
-    _worker_pattern_strings = pattern_strings
-    _worker_target_to_pair  = target_to_pair
+
+def _init_worker(pattern_strings, target_to_pair, doc_counter):
+    global _worker_patterns, _worker_target_to_pair, _worker_doc_counter
     _worker_patterns = {
         t: re.compile(p, re.IGNORECASE)
         for t, p in pattern_strings.items()
     }
+    _worker_target_to_pair = target_to_pair
+    _worker_doc_counter    = doc_counter
 
 
 def _process_shard(shard_index: int) -> tuple:
     """
     Worker task: stream one C4 shard and collect counts + matching documents.
-    Returns (shard_index, counts_dict, sentences_list, error_or_None).
+    Returns (shard_index, counts_dict, sentences_list, error_or_None, n_docs).
     """
     from datasets import load_dataset
 
@@ -68,12 +74,21 @@ def _process_shard(shard_index: int) -> tuple:
     counts    = defaultdict(int)
     sentences = []
     n_docs    = 0
+    _local    = 0   # local accumulator before flushing to shared counter
 
     try:
         dataset = load_dataset("json", data_files=[url],
                                split="train", streaming=True)
         for example in dataset:
-            n_docs += 1
+            n_docs  += 1
+            _local  += 1
+
+            # Flush to shared counter periodically
+            if _local >= COUNTER_INTERVAL:
+                with _worker_doc_counter.get_lock():
+                    _worker_doc_counter.value += _local
+                _local = 0
+
             text = example.get("text", "")
             if text and "and" in text.lower():
                 for target, pat in _worker_patterns.items():
@@ -86,6 +101,12 @@ def _process_shard(shard_index: int) -> tuple:
                             "ordering": target,
                             "sentence": text.strip(),
                         })
+
+        # Flush remainder
+        if _local:
+            with _worker_doc_counter.get_lock():
+                _worker_doc_counter.value += _local
+
     except Exception as e:
         return shard_index, {}, [], str(e), n_docs
 
@@ -191,8 +212,9 @@ def main():
         done_shards    = set()
         docs_per_shard = {}
 
-    total_shards = args.limit_shards or C4_TOTAL_SHARDS
-    remaining    = [i for i in range(total_shards) if i not in done_shards]
+    total_shards  = args.limit_shards or C4_TOTAL_SHARDS
+    remaining     = [i for i in range(total_shards) if i not in done_shards]
+    docs_done_so_far = sum(docs_per_shard.get(str(i), 0) for i in done_shards)
     print(f"Shards remaining: {len(remaining)}  |  Workers: {args.workers}\n")
 
     # Open sentences file for appending (safe to resume)
@@ -210,48 +232,69 @@ def main():
                        "done_shards": sorted(done_shards),
                        "docs_per_shard": docs_per_shard}, f)
 
-    # ── 3. Process shards in parallel ───────────────────────────────────────
+    # ── 3. Shared counter + polling thread ──────────────────────────────────
+    doc_counter  = multiprocessing.Value('l', docs_done_so_far)
+    stop_polling = threading.Event()
+
+    def poll_doc_counter(doc_pbar):
+        """Background thread: update the document tqdm bar in real time."""
+        last = docs_done_so_far
+        while not stop_polling.is_set():
+            time.sleep(2)
+            current = doc_counter.value
+            delta   = current - last
+            if delta > 0:
+                doc_pbar.update(delta)
+                last = current
+
+    # ── 4. Process shards in parallel ───────────────────────────────────────
     print(f"Processing {len(remaining)} shards across {args.workers} workers …\n")
 
     with ProcessPoolExecutor(max_workers=args.workers,
                              initializer=_init_worker,
-                             initargs=(pattern_strings, target_to_pair)) as pool:
+                             initargs=(pattern_strings, target_to_pair,
+                                       doc_counter)) as pool:
 
         futures = {pool.submit(_process_shard, i): i for i in remaining}
 
-        docs_searched = sum(docs_per_shard.get(str(i), 0) for i in done_shards)
-
         with tqdm(total=total_shards, initial=len(done_shards),
-                  desc="Shards", unit="shard", dynamic_ncols=True) as pbar, \
-             tqdm(total=C4_TOTAL_SHARDS * 356_000, initial=docs_searched,
+                  desc="Shards   ", unit="shard",
+                  position=0, dynamic_ncols=True) as shard_pbar, \
+             tqdm(total=C4_TOTAL_DOCS, initial=docs_done_so_far,
                   desc="Documents", unit="doc", unit_scale=True,
-                  dynamic_ncols=True) as doc_pbar:
+                  position=1, dynamic_ncols=True) as doc_pbar:
+
+            poll_thread = threading.Thread(target=poll_doc_counter,
+                                           args=(doc_pbar,), daemon=True)
+            poll_thread.start()
 
             for fut in as_completed(futures):
                 shard_idx, shard_counts, shard_sentences, err, n_docs = fut.result()
 
                 if err:
-                    pbar.write(f"  [ERROR] shard {shard_idx:04d}: {err}")
+                    shard_pbar.write(f"  [ERROR] shard {shard_idx:04d}: {err}")
                 else:
                     for target, n in shard_counts.items():
                         counts[target] += n
                     for row in shard_sentences:
                         sent_writer.writerow(row)
                     docs_per_shard[str(shard_idx)] = n_docs
-                    doc_pbar.update(n_docs)
 
                 done_shards.add(shard_idx)
                 save_checkpoint()
-                pbar.update(1)
+                shard_pbar.update(1)
 
                 if shard_sentences:
-                    pbar.write(f"  shard {shard_idx:04d}: "
-                               f"{sum(shard_counts.values())} matches")
+                    shard_pbar.write(f"  shard {shard_idx:04d}: "
+                                     f"{sum(shard_counts.values())} matches")
+
+            stop_polling.set()
+            poll_thread.join()
 
     sentences_f.close()
     print(f"\nFinished. {len(done_shards)} shards processed.")
 
-    # ── 4. Build and write results ───────────────────────────────────────────
+    # ── 5. Build and write results ───────────────────────────────────────────
     results = []
     for w1, w2 in pairs:
         t1 = f"{w1} and {w2}"
