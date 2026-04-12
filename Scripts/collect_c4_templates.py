@@ -34,11 +34,45 @@ TARGET_BACKGROUND = 100_000
 MIN_LEN = 50
 MAX_LEN = 250
 
+DEFAULT_BINOMIALS = str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv")
+
 # POS categories we want templates for
 KEEP_POS = {"NOUN", "ADJ", "VERB", "ADV"}
 POS_NORMALIZE = {"PROPN": "NOUN", "NUM": "NOUN"}
 
 AND_RE = re.compile(r'\b\w+\s+and\s+\w+\b', re.IGNORECASE)
+
+
+def load_binomial_index(path: str) -> dict:
+    """
+    Load binomials and build an inverted index word → set of frozensets.
+    Used to quickly check whether a sentence contains any excluded binomial.
+    """
+    from collections import defaultdict
+    idx = defaultdict(set)
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            w1 = row["word1"].strip().lower()
+            w2 = row["word2"].strip().lower()
+            pair = frozenset({w1, w2})
+            idx[w1].add(pair)
+            idx[w2].add(pair)
+    return idx
+
+
+def sentence_has_binomial(sent: str, word_index: dict) -> bool:
+    """Return True if the sentence contains any binomial (w1 + and + w2)."""
+    words = set(re.findall(r"\b[a-zA-Z'-]+\b", sent.lower()))
+    if "and" not in words:
+        return False
+    for word in words:
+        if word not in word_index:
+            continue
+        for pair in word_index[word]:
+            w1, w2 = tuple(pair)
+            if w1 in words and w2 in words:
+                return True
+    return False
 
 
 def normalize_pos(pos: str) -> str:
@@ -145,6 +179,8 @@ def main():
                         default=str(PROJECT_ROOT / "Data" / "templates.csv"))
     parser.add_argument("--background",
                         default=str(PROJECT_ROOT / "Data" / "background_sentences.csv"))
+    parser.add_argument("--binomials", default=DEFAULT_BINOMIALS,
+                        help="CSV of binomial pairs to exclude from background sentences.")
     parser.add_argument("--target-per-pos", type=int, default=TARGET_PER_POS)
     parser.add_argument("--target-background", type=int, default=TARGET_BACKGROUND)
     args = parser.parse_args()
@@ -161,6 +197,9 @@ def main():
 
     nlp = load_spacy()
     print("spaCy loaded.")
+
+    binomial_index = load_binomial_index(args.binomials)
+    print(f"Loaded binomial index ({len(binomial_index)} words) for background filtering.")
 
     tmpl_counts = defaultdict(int)   # pos → n collected
     bg_count    = 0
@@ -211,8 +250,8 @@ def main():
 
                     has_and = "and" in sent.lower()
 
-                    # Background: clean sentences without "and"
-                    if not background_done() and not has_and:
+                    # Background: clean sentences that contain no binomials
+                    if not background_done() and not sentence_has_binomial(sent, binomial_index):
                         bg_writer.writerow({"text": sent})
                         bg_count += 1
 
