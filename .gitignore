@@ -10,3 +10,6 @@ Data/finetune_corpus.csv
 # Checkpoints
 Data/checkpoint.json
 Data/c4_checkpoint.json
+
+# Model preference results (large; kept locally / on the cluster)
+Data/model_pref_results/

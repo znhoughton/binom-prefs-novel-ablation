@@ -55,7 +55,7 @@ finetune_opt () {
         --gradient_accumulation_steps ${GRAD_ACCUM} \
         --learning_rate ${LR} \
         --warmup_steps ${WARMUP_STEPS} \
-        --num_train_epochs 3 \
+        --num_train_epochs 1 \
         --save_strategy epoch \
         --save_total_limit 1 \
         --save_only_model \
