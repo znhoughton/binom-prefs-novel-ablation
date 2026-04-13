@@ -86,6 +86,7 @@ train_opt () {
         --dataset_name ${DATASET} \
         --do_train \
         --bf16 \
+        --gradient_checkpointing \
         --block_size ${BLOCK_SIZE} \
         --dataloader_num_workers 4 \
         --per_device_train_batch_size ${BATCH} \
@@ -113,36 +114,32 @@ train_opt () {
 
 
 ############################################
-# OPT-125M - 2x A100 80GB (Flash Attention)
-# tokens/step = 1024 × 400 × 1 × 2 = 819,200
-# save_steps = 20M / 819,200 ≈ 24 steps
+# OPT-125M - already trained, skip
 ############################################
-train_opt \
-  125m \
-  facebook/opt-125m \
-  768 \
-  12 \
-  12 \
-  3072 \
-  400 \
-  1 \
-  3e-4
+# train_opt \
+#   125m \
+#   facebook/opt-125m \
+#   768 \
+#   12 \
+#   12 \
+#   3072 \
+#   400 \
+#   1 \
+#   3e-4
 
 ############################################
-# OPT-350M - 2x A100 80GB (Flash Attention)
-# tokens/step = 1024 × 200 × 1 × 2 = 409,600
-# save_steps = 20M / 409,600 ≈ 48 steps
+# OPT-350M - already trained, skip
 ############################################
-train_opt \
-  350m \
-  facebook/opt-350m \
-  1024 \
-  16 \
-  24 \
-  4096 \
-  200 \
-  1 \
-  1e-4
+# train_opt \
+#   350m \
+#   facebook/opt-350m \
+#   1024 \
+#   16 \
+#   24 \
+#   4096 \
+#   200 \
+#   1 \
+#   1e-4
 
 ############################################
 # OPT-1.3B - 2x A100 80GB (Flash Attention)
