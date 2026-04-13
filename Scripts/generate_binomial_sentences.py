@@ -22,15 +22,18 @@ import csv
 import sys
 import time
 import argparse
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 SENTENCES_PER_ORDERING = 50
 REQUEST_BUFFER = 15   # ask for this many extra so trimming to target is reliable
-MODEL  = "claude-haiku-4-5-20251001"
+MODEL       = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 5
 RETRY_WAIT  = 10   # base seconds between retries (multiplied by attempt number)
+MAX_WORKERS = 5    # concurrent API calls (Tier 1 concurrent connection limit)
 
 
 def load_binomials(path: str) -> list:
@@ -53,7 +56,10 @@ def load_pool(path: str) -> dict:
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             key = (row["word1"], row["word2"], row["ordering"])
-            pool.setdefault(key, []).append(row["sentence"])
+            sents = pool.setdefault(key, [])
+            sent = row["sentence"]
+            if sent not in sents:   # deduplicate on load
+                sents.append(sent)
     return pool
 
 
@@ -149,21 +155,48 @@ def main():
             lst.extend(lst[:target - len(lst)])
         return lst[:target]
 
-    for w1, w2 in tqdm(remaining, desc="Generating"):
+    pool_lock = threading.Lock()
+
+    def process_pair(w1, w2):
         ord1 = f"{w1} and {w2}"
         ord2 = f"{w2} and {w1}"
         try:
             _, sents1, _, sents2 = generate_for_pair(w1, w2, n, client)
         except Exception as e:
-            print(f"\n  [ERROR] {w1}/{w2}: {e}")
-            continue
+            tqdm.write(f"  [ERROR] {w1}/{w2}: {e}")
+            return
+
+        # Retry individually for any ordering that came up short
+        for _ in range(MAX_RETRIES):
+            if len(sents1) >= n and len(sents2) >= n:
+                break
+            needed1 = max(0, n - len(sents1))
+            needed2 = max(0, n - len(sents2))
+            try:
+                _, new1, _, new2 = generate_for_pair(w1, w2, max(needed1, needed2), client)
+                if needed1 > 0:
+                    sents1 = list(dict.fromkeys(sents1 + new1))[:n]
+                if needed2 > 0:
+                    sents2 = list(dict.fromkeys(sents2 + new2))[:n]
+            except Exception as e:
+                tqdm.write(f"  [ERROR] retry {w1}/{w2}: {e}")
+                break
 
         if len(sents1) < n or len(sents2) < n:
-            print(f"\n  [WARN] {w1}/{w2}: got {len(sents1)}/{len(sents2)}, "
-                  f"need {n} — padding by repeating available sentences")
+            tqdm.write(f"  [WARN] {w1}/{w2}: still only "
+                       f"{len(sents1)}/{len(sents2)} after retries — padding")
 
-        pool[(w1, w2, ord1)] = pad_to(sents1, n)
-        pool[(w1, w2, ord2)] = pad_to(sents2, n)
+        with pool_lock:
+            pool[(w1, w2, ord1)] = pad_to(sents1, n)
+            pool[(w1, w2, ord2)] = pad_to(sents2, n)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_pair, w1, w2): (w1, w2)
+                   for w1, w2 in remaining}
+        with tqdm(total=len(remaining), desc="Generating") as pbar:
+            for fut in as_completed(futures):
+                fut.result()   # re-raise any unhandled exception
+                pbar.update(1)
 
     # Rewrite the whole file cleanly (avoids duplicate rows from partial runs)
     pool_path = Path(args.output_pool)

@@ -15,7 +15,7 @@ set -euo pipefail
 #     (created by ablate_corpus.py --push-removed-to-hub znhoughton/babylm-some-binoms-ablated)
 ############################################
 
-REMOVED_DATASET="znhoughton/babylm-some-binoms-ablated"
+REMOVED_DATASET="znhoughton/binom-ablation-finetune-corpus"
 TOKENIZER_NAME="opt-babylm-100m-bpe"
 BLOCK_SIZE=1024
 WARMUP_STEPS=200
