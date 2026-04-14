@@ -15,6 +15,8 @@ set -euo pipefail
 #     (created by ablate_corpus.py --push-removed-to-hub znhoughton/babylm-some-binoms-ablated)
 ############################################
 
+export HF_HOME=/workspace/hf_cache
+
 REMOVED_DATASET="znhoughton/binom-ablation-finetune-corpus"
 TOKENIZER_NAME="opt-babylm-100m-bpe"
 BLOCK_SIZE=1024
@@ -34,7 +36,7 @@ finetune_opt () {
 
     BASE_MODEL_ID="znhoughton/opt-babylm-${MODEL_SIZE}-ablated-20eps-seed${SEED}"
     FINETUNE_NAME="opt-babylm-${MODEL_SIZE}-ablated-finetuned-20eps"
-    RUN_DIR="runs/${FINETUNE_NAME}_${SEED}"
+    RUN_DIR="/tmp/runs/${FINETUNE_NAME}_${SEED}"
 
     echo "============================================================"
     echo "=== Fine-tuning ${FINETUNE_NAME} ==="
