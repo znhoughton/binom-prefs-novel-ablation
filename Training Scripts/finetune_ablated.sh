@@ -24,6 +24,28 @@ WARMUP_STEPS=200
 SEED=964
 
 TOKENIZER_PATH="models/${TOKENIZER_NAME}"
+VOCAB_SIZE=8192
+
+############################################
+# STEP 0: Generate tokenizer if not present
+############################################
+if [ -d "${TOKENIZER_PATH}" ]; then
+  echo "=== Tokenizer already exists at ${TOKENIZER_PATH}, skipping ==="
+else
+  echo "=== Generating tokenizer ==="
+  python tokenizer_and_config.py \
+    --base_model facebook/opt-125m \
+    --model_name ${TOKENIZER_NAME} \
+    --train_file znhoughton/babylm-150m-ablated \
+    --from_iterator \
+    --bpe \
+    --vocab ${VOCAB_SIZE} \
+    --hidden_size 768 \
+    --attention_heads 12 \
+    --layers 12 \
+    --intermediate_size 3072 \
+    --max_len ${BLOCK_SIZE}
+fi
 
 ############################################
 # FUNCTION: fine-tune one ablated OPT model
