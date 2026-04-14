@@ -9,7 +9,6 @@ BLOCK_SIZE=1024
 VOCAB_SIZE=8192
 # TARGET: 20M tokens per checkpoint
 TOKENS_PER_CHECKPOINT=20000000
-SAVE_TOTAL_LIMIT=1
 WARMUP_STEPS=4000
 SEED=964
 ############################################
@@ -93,7 +92,6 @@ train_opt () {
         --learning_rate ${LR} \
         --warmup_steps ${WARMUP_STEPS} \
         --save_steps ${SAVE_STEPS} \
-        --save_total_limit ${SAVE_TOTAL_LIMIT} \
         --save_only_model \
         --logging_steps 10 \
         --report_to tensorboard \
