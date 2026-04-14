@@ -107,7 +107,6 @@ train_opt () {
         --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
         --dataloader_num_workers 4 \
         --torch_compile \
-        --max_shard_size "500MB" \
         --ddp_find_unused_parameters False
 
     echo "=== Finished training ${MODEL_NAME} ==="
