@@ -114,7 +114,8 @@ train_opt () {
         --gradient_checkpointing \
         --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
         --torch_compile \
-        --ddp_find_unused_parameters False
+        --ddp_find_unused_parameters False \
+        --overwrite_output_dir
 
     echo "=== Finished training ${MODEL_NAME} ==="
     # IMPORTANT: free disk before next model
@@ -148,18 +149,18 @@ train_opt \
 # total steps ≈ 7320; warmup = 732 (10%)
 # save_steps = 20M / 409,600 ≈ 48 steps
 ############################################
-# train_opt \
-#   350m \
-#   facebook/opt-350m \
-#   1024 \
-#   16 \
-#   24 \
-#   4096 \
-#   200 \
-#   1 \
-#   1e-4 \
-#   2 \
-#   732
+train_opt \
+  350m \
+  facebook/opt-350m \
+  1024 \
+  16 \
+  24 \
+  4096 \
+  200 \
+  1 \
+  1e-4 \
+  2 \
+  732
 
 ############################################
 # OPT-1.3B - 4x A100 80GB (Flash Attention)
@@ -167,15 +168,15 @@ train_opt \
 # total steps ≈ 2928; warmup = 293 (10%)
 # save_steps = 20M / 1,024,000 ≈ 19 steps
 ############################################
-# train_opt \
-#   1.3b \
-#   facebook/opt-1.3b \
-#   2048 \
-#   32 \
-#   24 \
-#   8192 \
-#   250 \
-#   1 \
-#   1e-4 \
-#   4 \
-#   293
+train_opt \
+  1.3b \
+  facebook/opt-1.3b \
+  2048 \
+  32 \
+  24 \
+  8192 \
+  250 \
+  1 \
+  1e-4 \
+  4 \
+  293
