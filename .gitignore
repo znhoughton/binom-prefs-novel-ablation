@@ -13,3 +13,9 @@ Data/c4_checkpoint.json
 
 # Model preference results (large; kept locally / on the cluster)
 Data/model_pref_results/
+
+# Generated model configs and tokenizers (artifacts from tokenizer_and_config.py)
+Training Scripts/models/
+
+# Python cache
+Training Scripts/__pycache__/
