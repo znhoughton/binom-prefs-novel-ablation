@@ -87,6 +87,7 @@ train_opt () {
         --do_train \
         --bf16 \
         --gradient_checkpointing \
+        --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
         --block_size ${BLOCK_SIZE} \
         --per_device_train_batch_size ${BATCH} \
         --gradient_accumulation_steps ${GRAD_ACCUM} \
