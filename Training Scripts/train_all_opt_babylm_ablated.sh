@@ -105,7 +105,6 @@ train_opt () {
         --hub_strategy checkpoint \
         --gradient_checkpointing \
         --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
-        --dataloader_num_workers 4 \
         --torch_compile \
         --ddp_find_unused_parameters False
 
