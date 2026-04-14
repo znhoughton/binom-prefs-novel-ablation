@@ -50,7 +50,7 @@ train_opt () {
     LR=$9
 
     # Calculate tokens per step and save_steps
-    TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 2))
+    TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 4))
     SAVE_STEPS=$((TOKENS_PER_CHECKPOINT / TOKENS_PER_STEP))
 
     MODEL_NAME="opt-babylm-${MODEL_SIZE}-ablated-20eps"
@@ -78,7 +78,7 @@ train_opt () {
         --max_len ${BLOCK_SIZE}
 
     # Train
-    CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_autoreg.py \
+    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train_autoreg.py \
         --model_type opt \
         --config_name ${MODEL_PATH} \
         --tokenizer_name ${TOKENIZER_PATH} \
@@ -147,8 +147,8 @@ train_opt () {
 
 ############################################
 # OPT-1.3B - 2x A100 80GB (Flash Attention)
-# tokens/step = 1024 × 250 × 1 × 2 = 512,000
-# save_steps = 20M / 512,000 = 39 steps
+# tokens/step = 1024 × 250 × 1 × 4 = 1,024,000
+# save_steps = 20M / 1,024,000 ≈ 19 steps
 ############################################
 train_opt \
   1.3b \
