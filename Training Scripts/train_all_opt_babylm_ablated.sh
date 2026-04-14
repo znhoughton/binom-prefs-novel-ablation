@@ -12,7 +12,6 @@ VOCAB_SIZE=8192
 # TARGET: 20M tokens per checkpoint
 TOKENS_PER_CHECKPOINT=20000000
 SAVE_TOTAL_LIMIT=1
-WARMUP_STEPS=4000
 SEED=964
 ############################################
 # STEP 0: Train tokenizer ONCE
@@ -41,7 +40,7 @@ fi
 ############################################
 # FUNCTION: train one OPT model
 # Args: MODEL_SIZE BASE_MODEL HIDDEN HEADS
-#       LAYERS FFN BATCH GRAD_ACCUM LR N_GPUS
+#       LAYERS FFN BATCH GRAD_ACCUM LR N_GPUS WARMUP
 ############################################
 train_opt () {
     MODEL_SIZE=$1
@@ -54,6 +53,7 @@ train_opt () {
     GRAD_ACCUM=$8
     LR=$9
     N_GPUS=${10}
+    WARMUP_STEPS=${11}
 
     # Build CUDA_VISIBLE_DEVICES string (e.g. "0,1" or "0,1,2,3")
     CUDA_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
@@ -124,25 +124,28 @@ train_opt () {
 
 
 ############################################
-# OPT-125M - already trained, skip
+# OPT-125M
 # 2 GPUs: tokens/step = 1024 × 400 × 1 × 2 = 819,200
+# total steps ≈ 3660; warmup = 366 (10%)
 # save_steps = 20M / 819,200 ≈ 24 steps
 ############################################
-# train_opt \
-#   125m \
-#   facebook/opt-125m \
-#   768 \
-#   12 \
-#   12 \
-#   3072 \
-#   400 \
-#   1 \
-#   3e-4 \
-#   2
+train_opt \
+  125m \
+  facebook/opt-125m \
+  768 \
+  12 \
+  12 \
+  3072 \
+  400 \
+  1 \
+  3e-4 \
+  2 \
+  366
 
 ############################################
-# OPT-350M - already trained, skip
+# OPT-350M
 # 2 GPUs: tokens/step = 1024 × 200 × 1 × 2 = 409,600
+# total steps ≈ 7320; warmup = 732 (10%)
 # save_steps = 20M / 409,600 ≈ 48 steps
 ############################################
 # train_opt \
@@ -155,21 +158,24 @@ train_opt () {
 #   200 \
 #   1 \
 #   1e-4 \
-#   2
+#   2 \
+#   732
 
 ############################################
 # OPT-1.3B - 4x A100 80GB (Flash Attention)
 # 4 GPUs: tokens/step = 1024 × 250 × 1 × 4 = 1,024,000
+# total steps ≈ 2928; warmup = 293 (10%)
 # save_steps = 20M / 1,024,000 ≈ 19 steps
 ############################################
-train_opt \
-  1.3b \
-  facebook/opt-1.3b \
-  2048 \
-  32 \
-  24 \
-  8192 \
-  250 \
-  1 \
-  1e-4 \
-  4
+# train_opt \
+#   1.3b \
+#   facebook/opt-1.3b \
+#   2048 \
+#   32 \
+#   24 \
+#   8192 \
+#   250 \
+#   1 \
+#   1e-4 \
+#   4 \
+#   293
