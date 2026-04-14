@@ -570,7 +570,6 @@ def main():
     else:
         model = AutoModelForCausalLM.from_config(
             config, trust_remote_code=model_args.trust_remote_code,
-            attn_implementation="flash_attention_2",
         )
         n_params = sum(
             {p.data_ptr(): p.numel() for p in model.parameters()}.values()
