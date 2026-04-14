@@ -86,7 +86,6 @@ train_opt () {
         --dataset_name ${DATASET} \
         --do_train \
         --bf16 \
-        --gradient_checkpointing \
         --block_size ${BLOCK_SIZE} \
         --per_device_train_batch_size ${BATCH} \
         --gradient_accumulation_steps ${GRAD_ACCUM} \
@@ -143,8 +142,8 @@ train_opt () {
 
 ############################################
 # OPT-1.3B - 2x A100 80GB (Flash Attention)
-# tokens/step = 1024 × 150 × 1 × 2 = 307,200
-# save_steps = 20M / 307,200 ≈ 65 steps
+# tokens/step = 1024 × 100 × 1 × 2 = 204,800
+# save_steps = 20M / 204,800 ≈ 97 steps
 ############################################
 train_opt \
   1.3b \
@@ -153,6 +152,6 @@ train_opt \
   32 \
   24 \
   8192 \
-  150 \
+  100 \
   1 \
   1e-4
