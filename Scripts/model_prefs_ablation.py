@@ -162,7 +162,7 @@ MODEL_CONFIGS = {
         "log_sample":         False,
     },
     "znhoughton/opt-babylm-1.3b-ablated-finetuned-20eps-seed964": {
-        "tokens_per_step":    1_024_000,
+        "tokens_per_step":    204_800,  # 1024 × 100 × 1 × 2 (finetune_ablated.sh: batch=100, 2 GPUs)
         "tokenizer":          "znhoughton/opt-babylm-1.3b-ablated-20eps-seed964",
         "checkpoint_source":  "final",
         "model_type":         "finetuned",
