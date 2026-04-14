@@ -20,7 +20,6 @@ export HF_HOME=/workspace/hf_cache
 REMOVED_DATASET="znhoughton/binom-ablation-finetune-corpus"
 TOKENIZER_NAME="opt-babylm-100m-bpe"
 BLOCK_SIZE=1024
-WARMUP_STEPS=200
 SEED=964
 
 TOKENIZER_PATH="models/${TOKENIZER_NAME}"
@@ -55,6 +54,7 @@ finetune_opt () {
     BATCH=$2
     GRAD_ACCUM=$3
     LR=$4
+    WARMUP_STEPS=$5
 
     BASE_MODEL_ID="znhoughton/opt-babylm-${MODEL_SIZE}-ablated-20eps-seed${SEED}"
     FINETUNE_NAME="opt-babylm-${MODEL_SIZE}-ablated-finetuned-20eps"
@@ -99,27 +99,33 @@ finetune_opt () {
 
 ############################################
 # OPT-125M
+# total steps = ceil(3249 / (64*2)) = 26; warmup = 2
 ############################################
 finetune_opt \
   125m \
   64 \
   1 \
-  3e-5
+  3e-5 \
+  2
 
 ############################################
 # OPT-350M
+# total steps = ceil(3249 / (32*2)) = 51; warmup = 5
 ############################################
 finetune_opt \
   350m \
   32 \
   1 \
-  1e-5
+  1e-5 \
+  5
 
 ############################################
 # OPT-1.3B
+# total steps = ceil(3249 / (16*2)) = 102; warmup = 10
 ############################################
 finetune_opt \
   1.3b \
   16 \
   1 \
-  1e-5
+  1e-5 \
+  10
