@@ -90,6 +90,7 @@ train_opt () {
         --block_size ${BLOCK_SIZE} \
         --per_device_train_batch_size ${BATCH} \
         --gradient_accumulation_steps ${GRAD_ACCUM} \
+        --optim adamw_torch_fused \
         --learning_rate ${LR} \
         --warmup_steps ${WARMUP_STEPS} \
         --save_steps ${SAVE_STEPS} \
