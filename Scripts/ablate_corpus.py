@@ -667,9 +667,9 @@ def main():
     parser.add_argument("--dataset",      default=DEFAULT_DATASET,
                         help="HuggingFace dataset name or local path.")
     parser.add_argument("--exclude",
-                        default=str(PROJECT_ROOT / "Data" / "novel_binomials_final_list.csv"),
+                        default=str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv"),
                         help="CSV of binomial pairs to remove (word1, word2 columns). "
-                             "Defaults to Data/novel_binomials_final_list.csv.")
+                             "Defaults to Data/novel_binomials_curated.csv.")
     parser.add_argument("--output",       default=str(PROJECT_ROOT / "Data" / "ablated_corpus"),
                         help="Local directory to save the ablated dataset.")
     parser.add_argument("--push-to-hub",  default=None, metavar="REPO_ID",
