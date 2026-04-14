@@ -103,6 +103,8 @@ train_opt () {
         --push_to_hub \
         --hub_model_id znhoughton/${MODEL_NAME}-seed${SEED} \
         --hub_strategy checkpoint \
+        --gradient_checkpointing \
+        --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
         --ddp_find_unused_parameters False
 
     echo "=== Finished training ${MODEL_NAME} ==="
