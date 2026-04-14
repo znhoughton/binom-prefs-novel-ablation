@@ -86,6 +86,7 @@ train_opt () {
         --dataset_name ${DATASET} \
         --do_train \
         --bf16 \
+        --gradient_checkpointing \
         --block_size ${BLOCK_SIZE} \
         --per_device_train_batch_size ${BATCH} \
         --gradient_accumulation_steps ${GRAD_ACCUM} \
