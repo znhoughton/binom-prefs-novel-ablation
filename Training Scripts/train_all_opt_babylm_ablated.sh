@@ -40,6 +40,8 @@ else
 fi
 ############################################
 # FUNCTION: train one OPT model
+# Args: MODEL_SIZE BASE_MODEL HIDDEN HEADS
+#       LAYERS FFN BATCH GRAD_ACCUM LR N_GPUS
 ############################################
 train_opt () {
     MODEL_SIZE=$1
@@ -51,9 +53,13 @@ train_opt () {
     BATCH=$7
     GRAD_ACCUM=$8
     LR=$9
+    N_GPUS=${10}
+
+    # Build CUDA_VISIBLE_DEVICES string (e.g. "0,1" or "0,1,2,3")
+    CUDA_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
 
     # Calculate tokens per step and save_steps
-    TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 4))
+    TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * N_GPUS))
     SAVE_STEPS=$((TOKENS_PER_CHECKPOINT / TOKENS_PER_STEP))
 
     MODEL_NAME="opt-babylm-${MODEL_SIZE}-ablated-20eps"
@@ -62,7 +68,7 @@ train_opt () {
 
     echo "============================================================"
     echo "=== Training ${MODEL_NAME} ==="
-    echo "=== Tokens/step: ${TOKENS_PER_STEP} ==="
+    echo "=== GPUs: ${N_GPUS} | Tokens/step: ${TOKENS_PER_STEP} ==="
     echo "=== Save every ${SAVE_STEPS} steps (${TOKENS_PER_CHECKPOINT} tokens) ==="
     echo "============================================================"
 
@@ -81,7 +87,7 @@ train_opt () {
         --max_len ${BLOCK_SIZE}
 
     # Train
-    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train_autoreg.py \
+    CUDA_VISIBLE_DEVICES=${CUDA_DEVICES} torchrun --nproc_per_node=${N_GPUS} train_autoreg.py \
         --model_type opt \
         --config_name ${MODEL_PATH} \
         --tokenizer_name ${TOKENIZER_PATH} \
@@ -119,7 +125,7 @@ train_opt () {
 
 ############################################
 # OPT-125M - already trained, skip
-# tokens/step = 1024 × 400 × 1 × 2 = 819,200
+# 2 GPUs: tokens/step = 1024 × 400 × 1 × 2 = 819,200
 # save_steps = 20M / 819,200 ≈ 24 steps
 ############################################
 # train_opt \
@@ -131,11 +137,12 @@ train_opt () {
 #   3072 \
 #   400 \
 #   1 \
-#   3e-4
+#   3e-4 \
+#   2
 
 ############################################
 # OPT-350M - already trained, skip
-# tokens/step = 1024 × 200 × 1 × 2 = 409,600
+# 2 GPUs: tokens/step = 1024 × 200 × 1 × 2 = 409,600
 # save_steps = 20M / 409,600 ≈ 48 steps
 ############################################
 # train_opt \
@@ -147,11 +154,12 @@ train_opt () {
 #   4096 \
 #   200 \
 #   1 \
-#   1e-4
+#   1e-4 \
+#   2
 
 ############################################
-# OPT-1.3B - 2x A100 80GB (Flash Attention)
-# tokens/step = 1024 × 250 × 1 × 4 = 1,024,000
+# OPT-1.3B - 4x A100 80GB (Flash Attention)
+# 4 GPUs: tokens/step = 1024 × 250 × 1 × 4 = 1,024,000
 # save_steps = 20M / 1,024,000 ≈ 19 steps
 ############################################
 train_opt \
@@ -163,4 +171,5 @@ train_opt \
   8192 \
   250 \
   1 \
-  1e-4
+  1e-4 \
+  4
