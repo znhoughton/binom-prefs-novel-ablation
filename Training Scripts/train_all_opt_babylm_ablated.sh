@@ -3,6 +3,8 @@ set -euo pipefail
 ############################################
 # USER SETTINGS
 ############################################
+export HF_HOME=/workspace/hf_cache
+
 DATASET="znhoughton/babylm-150m-ablated"
 TOKENIZER_NAME="opt-babylm-100m-bpe"
 BLOCK_SIZE=1024
