@@ -164,9 +164,11 @@ train_opt \
 
 ############################################
 # OPT-1.3B - 4x A100 80GB (Flash Attention)
-# 4 GPUs: tokens/step = 1024 × 250 × 1 × 4 = 1,024,000
+# 4 GPUs: tokens/step = 1024 × 125 × 2 × 4 = 1,024,000
 # total steps ≈ 2928; warmup = 293 (10%)
 # save_steps = 20M / 1,024,000 ≈ 19 steps
+# batch=125 + grad_accum=2 to avoid fp32 FFN backward OOM
+# (effective batch identical to baseline: 500 seqs/step/gpu)
 ############################################
 train_opt \
   1.3b \
@@ -175,8 +177,8 @@ train_opt \
   32 \
   24 \
   8192 \
-  250 \
-  1 \
+  125 \
+  2 \
   1e-4 \
   4 \
   293
