@@ -118,22 +118,22 @@ LIST_OF_PROMPTS = [
 #   "final"      — no intermediate checkpoints; load the head of main branch once
 #
 # tokens_per_step  = block_size × per_device_batch × grad_accum × n_gpus
-#   125m  ablated: 1024 × 400 × 1 × 2 = 819,200
-#   350m  ablated: 1024 × 200 × 1 × 2 = 409,600
-#   1.3b  ablated: 1024 × 250 × 1 × 4 = 1,024,000
-#   (finetuned use the same batch sizes but only one checkpoint is saved)
+#   125m  ablated: 1024 × 400 × 1 × 4 = 1,638,400
+#   350m  ablated: 1024 × 200 × 1 × 4 = 819,200
+#   1.3b  ablated: 1024 × 125 × 2 × 4 = 1,024,000
+#   (finetuned: checkpoint_source="final" so tokens_per_step is unused)
 
 MODEL_CONFIGS = {
     # ── Ablated models ────────────────────────────────────────────────────────
     "znhoughton/opt-babylm-125m-ablated-20eps-seed964": {
-        "tokens_per_step":    819_200,
+        "tokens_per_step":    1_638_400,
         "tokenizer":          "znhoughton/opt-babylm-125m-ablated-20eps-seed964",
         "checkpoint_source":  "step_tags",
         "model_type":         "ablated",
         "log_sample":         False,
     },
     "znhoughton/opt-babylm-350m-ablated-20eps-seed964": {
-        "tokens_per_step":    409_600,
+        "tokens_per_step":    819_200,
         "tokenizer":          "znhoughton/opt-babylm-350m-ablated-20eps-seed964",
         "checkpoint_source":  "step_tags",
         "model_type":         "ablated",
