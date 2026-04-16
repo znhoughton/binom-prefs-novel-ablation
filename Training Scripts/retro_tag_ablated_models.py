@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 import stat
+from huggingface_hub import get_token
 # ==========================================================
 #  MODEL CONFIGS (keys only are used here)
 # ==========================================================
@@ -32,11 +33,12 @@ def run(cmd, cwd=None):
 
 def clone_repo(repo_id, target_dir):
     print(f"\n📥 Cloning {repo_id}")
+    token = get_token()
     env = os.environ.copy()
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
 
     subprocess.run(
-        ["git", "clone", f"https://huggingface.co/{repo_id}", str(target_dir)],
+        ["git", "clone", f"https://user:{token}@huggingface.co/{repo_id}", str(target_dir)],
         check=True,
         env=env,
     )
