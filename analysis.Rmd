@@ -1,0 +1,272 @@
+---
+title: "Binomial Ordering Preferences — Ablation Analysis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 5)
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+
+theme_set(theme_bw(base_size = 12))
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+DATA_DIR    <- "Data/model_pref_results"
+BIGRAM_CSV  <- "Data/bigram_stats.csv"
+FREQ_CSV    <- "Data/frequency_log.csv"
+```
+
+## Load & join data
+
+```{r load}
+# Load all per-checkpoint CSVs and stack them
+pref_raw <- list.files(DATA_DIR, pattern = "\\.csv$", full.names = TRUE) |>
+  map(read_csv, show_col_types = FALSE) |>
+  bind_rows()
+
+# Parse model size from model name
+pref_raw <- pref_raw |>
+  mutate(
+    model_size = case_when(
+      str_detect(model, "1\\.3b") ~ "1.3B",
+      str_detect(model, "350m")   ~ "350M",
+      str_detect(model, "125m")   ~ "125M",
+      TRUE                        ~ "unknown"
+    ),
+    model_size = factor(model_size, levels = c("125M", "350M", "1.3B"))
+  )
+
+# Load bigram stats (one row per binomial)
+bigrams <- read_csv(BIGRAM_CSV, show_col_types = FALSE) |>
+  mutate(bigram_log_ratio = log(bigram_alpha) - log(bigram_nonalpha)) |>
+  select(binom_alpha, bigram_alpha, bigram_nonalpha, bigram_log_ratio,
+         count_w1, count_w2, count_w1_and, count_w2_and,
+         count_and_w1, count_and_w2)
+
+# Load frequency log (overall_freq = total training occurrences in finetune corpus)
+freqs <- read_csv(FREQ_CSV, show_col_types = FALSE) |>
+  mutate(binom_alpha = paste(pmin(word1, word2), "and", pmax(word1, word2))) |>
+  select(binom_alpha, overall_freq, bin)
+
+# Join everything
+pref <- pref_raw |>
+  left_join(bigrams, by = "binom_alpha") |>
+  left_join(freqs,   by = "binom_alpha") |>
+  mutate(
+    # preference residualised against bigram log-ratio
+    pref_residual = preference - bigram_log_ratio
+  )
+
+cat(sprintf("Loaded %d rows | %d models | %d unique binomials\n",
+            nrow(pref), n_distinct(pref$model), n_distinct(pref$binom_alpha)))
+```
+
+---
+
+## Plot 1a — Final checkpoint: raw preference vs bigram log-ratio (ablated models)
+
+Do models show preferences, and are those preferences driven by bigram statistics
+or something more?
+
+```{r plot1a}
+final_ablated <- pref |>
+  filter(model_type == "ablated") |>
+  group_by(model, model_size, binom_alpha, bigram_log_ratio) |>
+  slice_max(step, n = 1) |>
+  summarise(mean_pref = mean(preference), .groups = "drop")
+
+ggplot(final_ablated, aes(x = bigram_log_ratio, y = mean_pref, colour = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", colour = "grey40") +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.8) +
+  facet_wrap(~model_size) +
+  labs(
+    title    = "Model preference vs corpus bigram log-ratio (final checkpoint, ablated)",
+    subtitle = "Dotted line = perfect bigram match; slope > 1 means model amplifies corpus statistics",
+    x        = "log P(and|w1)·P(w2|and) − log P(and|w2)·P(w1|and)  [bigram log-ratio]",
+    y        = "Mean preference  (log P(α) − log P(non-α))",
+    colour   = "Model size"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+## Plot 1b — Final checkpoint: residual preference after accounting for bigrams
+
+```{r plot1b}
+ggplot(final_ablated |>
+         mutate(pref_residual = mean_pref - bigram_log_ratio),
+       aes(x = model_size, y = pref_residual, colour = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_jitter(width = 0.15, alpha = 0.5, size = 2) +
+  stat_summary(fun.data = mean_cl_boot, geom = "pointrange",
+               colour = "black", size = 0.7) +
+  labs(
+    title    = "Residual preference above bigram log-ratio (final checkpoint, ablated)",
+    subtitle = "Each point = one binomial; black bar = mean ± 95% CI",
+    x        = "Model size",
+    y        = "Preference − bigram log-ratio",
+    colour   = "Model size"
+  ) +
+  theme(legend.position = "none")
+```
+
+---
+
+## Plot 2 — Evolution of (residualised) preference throughout training
+
+```{r plot2, fig.height=6}
+training_curve <- pref |>
+  filter(model_type == "ablated", !is.na(tokens), tokens > 0) |>
+  group_by(model, model_size, tokens, binom_alpha, bigram_log_ratio) |>
+  summarise(mean_pref = mean(preference), .groups = "drop") |>
+  mutate(pref_residual = mean_pref - bigram_log_ratio) |>
+  group_by(model_size, tokens) |>
+  summarise(
+    mean_raw      = mean(mean_pref),
+    mean_residual = mean(pref_residual),
+    se_residual   = sd(pref_residual) / sqrt(n()),
+    .groups = "drop"
+  )
+
+p_raw <- ggplot(training_curve,
+                aes(x = tokens / 1e6, y = mean_raw, colour = model_size)) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  scale_x_continuous(labels = scales::label_number(suffix = "M")) +
+  labs(title = "Raw preference over training",
+       x = "Training tokens", y = "Mean preference", colour = "Size")
+
+p_resid <- ggplot(training_curve,
+                  aes(x = tokens / 1e6, y = mean_residual,
+                      colour = model_size, fill = model_size)) +
+  geom_ribbon(aes(ymin = mean_residual - se_residual,
+                  ymax = mean_residual + se_residual), alpha = 0.15, colour = NA) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  scale_x_continuous(labels = scales::label_number(suffix = "M")) +
+  labs(title = "Residual preference (above bigram log-ratio) over training",
+       x = "Training tokens", y = "Mean residual preference", colour = "Size",
+       fill = "Size")
+
+p_raw / p_resid + plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+---
+
+## Plot 3 — Ablated vs finetuned: preference shift by training frequency
+
+For each (binomial, prefix) pair, how much does the preference change after finetuning
+on the removed sentences? Does this scale with how often the binomial appeared?
+
+```{r plot3, fig.height=6}
+last_ablated <- pref |>
+  filter(model_type == "ablated") |>
+  group_by(model_size) |>
+  slice_max(step, n = 1) |>
+  ungroup() |>
+  select(model_size, binom_alpha, prompt, pref_ablated = preference)
+
+last_finetuned <- pref |>
+  filter(model_type == "finetuned") |>
+  select(model_size, binom_alpha, prompt, pref_finetuned = preference)
+
+delta_df <- inner_join(last_ablated, last_finetuned,
+                       by = c("model_size", "binom_alpha", "prompt")) |>
+  mutate(pref_delta = pref_finetuned - pref_ablated) |>
+  left_join(freqs, by = "binom_alpha")
+
+# Mean delta per binomial × model size
+delta_binom <- delta_df |>
+  group_by(model_size, binom_alpha, overall_freq) |>
+  summarise(mean_delta = mean(pref_delta), .groups = "drop")
+
+ggplot(delta_binom, aes(x = log1p(overall_freq), y = mean_delta,
+                        colour = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(alpha = 0.5, size = 1.8) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
+  facet_wrap(~model_size) +
+  labs(
+    title    = "Preference shift (finetuned − ablated) vs training frequency",
+    subtitle = "Positive = finetuning pushed model toward alpha ordering",
+    x        = "log(1 + overall_freq in finetune corpus)",
+    y        = "Δ preference  (finetuned − ablated)",
+    colour   = "Model size"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r plot3_regression}
+# Print regression summaries
+delta_df |>
+  group_by(model_size) |>
+  group_map(~ {
+    cat("\n===", .y$model_size, "===\n")
+    print(summary(lm(pref_delta ~ log1p(overall_freq), data = .x)))
+  })
+```
+
+---
+
+## Plot 4 — Per-binomial preference heatmap at final checkpoint (ablated)
+
+Which binomials develop the strongest preferences, and do they agree across model sizes?
+
+```{r plot4, fig.height=10}
+heatmap_df <- pref |>
+  filter(model_type == "ablated") |>
+  group_by(model, model_size, binom_alpha) |>
+  slice_max(step, n = 1) |>
+  summarise(mean_pref = mean(preference), .groups = "drop") |>
+  mutate(binom_alpha = fct_reorder(binom_alpha, mean_pref, .fun = mean))
+
+ggplot(heatmap_df, aes(x = model_size, y = binom_alpha, fill = mean_pref)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#d73027", mid = "white", high = "#1a9850",
+                       midpoint = 0, name = "Preference\n(α − non-α)") +
+  labs(
+    title = "Per-binomial preference at final checkpoint (ablated models)",
+    x     = "Model size",
+    y     = "Binomial (alphabetical order)"
+  ) +
+  theme(axis.text.y = element_text(size = 6))
+```
+
+---
+
+## Plot 5 — Model size effect: do larger models develop stronger preferences?
+
+```{r plot5}
+size_comparison <- pref |>
+  filter(model_type == "ablated") |>
+  group_by(model_size, binom_alpha, bigram_log_ratio) |>
+  slice_max(step, n = 1) |>
+  summarise(mean_pref = mean(preference), .groups = "drop") |>
+  mutate(pref_residual = mean_pref - bigram_log_ratio)
+
+ggplot(size_comparison,
+       aes(x = model_size, y = pref_residual, fill = model_size)) +
+  geom_violin(alpha = 0.4, draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.1, alpha = 0.4, size = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  stat_summary(fun = mean, geom = "point", shape = 23,
+               size = 4, fill = "white", colour = "black") +
+  labs(
+    title    = "Residual preference by model size (final checkpoint, ablated)",
+    subtitle = "Diamond = mean; violin quantiles at 25/50/75%",
+    x        = "Model size",
+    y        = "Preference − bigram log-ratio",
+    fill     = "Model size"
+  ) +
+  theme(legend.position = "none")
+```
