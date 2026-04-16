@@ -56,6 +56,12 @@ ENABLE_COMPILE    = True
 USE_TORCH_COMPILE = ENABLE_COMPILE and (os.name != "nt")
 COMPILE_MODE      = "reduce-overhead"
 
+# Number of worker processes to run per GPU.
+# Each process loads one checkpoint at a time; multiple workers share the GPU.
+# With fp16 models (125m≈250MB, 350m≈700MB, 1.3b≈2.6GB) a 70GB GPU can
+# comfortably host several concurrent workers.
+WORKERS_PER_GPU   = 10
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 LIST_OF_PROMPTS = [
     " ",
@@ -548,8 +554,8 @@ def run_work_item(item: WorkItem, device: str, out_dir: str) -> None:
         shutil.rmtree(tmp_cache, ignore_errors=True)
 
 
-def worker_main(rank: int, items: List[WorkItem]) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+def worker_main(rank: int, gpu_id: int, items: List[WorkItem]) -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     torch.cuda.set_device(0)
     device = "cuda:0"
 
@@ -644,21 +650,20 @@ def main():
     print(f"\n🖥️  Detected {num_gpus} GPU(s)")
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    if num_gpus >= 2:
-        print(f"\n🚀 Sharding {len(items)} checkpoints across {num_gpus} GPUs")
-        shards = shard_items(items, num_gpus)
+    if num_gpus >= 1:
+        num_workers = num_gpus * WORKERS_PER_GPU
+        print(f"\n🚀 Sharding {len(items)} checkpoints across {num_workers} workers "
+              f"({WORKERS_PER_GPU} per GPU × {num_gpus} GPU(s))")
+        shards = shard_items(items, num_workers)
         ctx    = mp.get_context("spawn")
         procs  = []
-        for rank in range(num_gpus):
-            p = ctx.Process(target=worker_main, args=(rank, shards[rank]))
+        for rank in range(num_workers):
+            gpu_id = rank % num_gpus
+            p = ctx.Process(target=worker_main, args=(rank, gpu_id, shards[rank]))
             p.start()
             procs.append(p)
         for p in procs:
             p.join()
-    elif num_gpus == 1:
-        print("\n🚀 Running on single GPU")
-        for item in items:
-            run_work_item(item, device="cuda:0", out_dir=OUT_DIR)
     else:
         print("\n⚠️  No GPU detected — running on CPU (slow)")
         for item in items:
