@@ -4,7 +4,15 @@ import shutil
 import subprocess
 from pathlib import Path
 import stat
-from huggingface_hub import get_token
+from huggingface_hub import get_token as _get_token
+
+def get_hf_token():
+    token = _get_token()
+    if token is None:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token is None:
+        raise RuntimeError("No HuggingFace token found. Run `huggingface-cli login` or set HF_TOKEN.")
+    return token
 # ==========================================================
 #  MODEL CONFIGS (keys only are used here)
 # ==========================================================
@@ -23,17 +31,14 @@ BASE_DIR.mkdir(exist_ok=True)
 
 
 def force_rmtree(path):
-    subprocess.run(
-        ["cmd", "/c", "rmdir", "/s", "/q", str(path)],
-        check=True
-    )
+    shutil.rmtree(str(path), ignore_errors=True)
 
 def run(cmd, cwd=None):
     subprocess.run(cmd, cwd=cwd, check=True)
 
 def clone_repo(repo_id, target_dir):
     print(f"\n📥 Cloning {repo_id}")
-    token = get_token()
+    token = get_hf_token()
     env = os.environ.copy()
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
 
