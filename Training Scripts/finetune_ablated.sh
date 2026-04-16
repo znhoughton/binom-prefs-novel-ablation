@@ -74,6 +74,7 @@ finetune_opt () {
         --do_train \
         --bf16 \
         --gradient_checkpointing \
+        --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
         --block_size ${BLOCK_SIZE} \
         --per_device_train_batch_size ${BATCH} \
         --gradient_accumulation_steps ${GRAD_ACCUM} \
@@ -121,11 +122,13 @@ finetune_opt \
 
 ############################################
 # OPT-1.3B
-# total steps = ceil(3249 / (16*2)) = 102; warmup = 10
+# total steps = ceil(3249 / (8*2*2)) = 102; warmup = 10
+# batch=8 + grad_accum=2 to avoid fp32 FFN backward OOM
+# (effective batch identical: 8 × 2 × 2 GPUs = 32 seqs/step)
 ############################################
 finetune_opt \
   1.3b \
-  16 \
-  1 \
+  8 \
+  2 \
   1e-5 \
   10
