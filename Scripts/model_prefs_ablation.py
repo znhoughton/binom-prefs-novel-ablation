@@ -60,7 +60,7 @@ COMPILE_MODE      = "reduce-overhead"
 # Each process loads one checkpoint at a time; multiple workers share the GPU.
 # With fp16 models (125m≈250MB, 350m≈700MB, 1.3b≈2.6GB) a 70GB GPU can
 # comfortably host several concurrent workers.
-WORKERS_PER_GPU   = 10
+WORKERS_PER_GPU   = 8
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 LIST_OF_PROMPTS = [
