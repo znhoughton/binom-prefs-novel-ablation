@@ -13,6 +13,8 @@ Output per checkpoint: one CSV in Data/model_pref_results/ with columns:
   binom_alpha,           ← binomial with words in alphabetical order
   total_training_occurrences,  ← 0 for ablated; 2×bin for finetuned
   relfreq,               ← NA for ablated; 0.5 for finetuned
+  bigram_alpha,          ← P(and|w1_alpha) × P(w2_alpha|and) from BIGRAM_CORPUS
+  bigram_nonalpha,       ← P(and|w2_alpha) × P(w1_alpha|and) from BIGRAM_CORPUS
   prompt, binom,
   alpha_logprob, nonalpha_logprob, preference
 
@@ -21,12 +23,15 @@ Multi-GPU: shards checkpoints across GPUs (one process per GPU).
 """
 
 import os
+import re
 import csv
+import json
 import traceback
 import multiprocessing as mp
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import tempfile
 import shutil
 
@@ -43,13 +48,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-OUT_DIR      = str(PROJECT_ROOT / "Data" / "model_pref_results")
-BINOMS_CSV   = str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv")
-FREQ_LOG_CSV = str(PROJECT_ROOT / "Data" / "frequency_log.csv")
+OUT_DIR        = str(PROJECT_ROOT / "Data" / "model_pref_results")
+BINOMS_CSV     = str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv")
+FREQ_LOG_CSV   = str(PROJECT_ROOT / "Data" / "frequency_log.csv")
+BIGRAM_CACHE   = str(PROJECT_ROOT / "Data" / "bigram_stats.json")
+BIGRAM_CORPUS  = "znhoughton/babylm-150m-v3"   # baseline corpus for natural bigram stats
 
 # Cache globals (populated once per worker process)
-_BINOMS_DF  = None
-_FREQ_INDEX = None   # (word1, word2) -> {"bin": int, "overall_freq": int}
+_BINOMS_DF    = None
+_FREQ_INDEX   = None   # (word1, word2) -> {"bin": int, "overall_freq": int}
+_BIGRAM_STATS = None   # dict with count_w_and, count_and_w, count_w, count_and
 
 # Enable compile on Linux only (Inductor backend not stable on Windows).
 ENABLE_COMPILE    = True
@@ -195,6 +203,85 @@ def load_freq_index() -> Dict:
     except FileNotFoundError:
         print(f"⚠️  {FREQ_LOG_CSV} not found — total_training_occurrences will be NA for finetuned models")
     return idx
+
+
+def build_bigram_stats(target_words: set) -> Dict:
+    """
+    Scan BIGRAM_CORPUS once, counting word-level bigrams involving 'and'
+    and the target words.  Saves result to BIGRAM_CACHE.
+    """
+    from datasets import load_dataset
+
+    count_w_and: Dict[str, int] = defaultdict(int)  # count(w, "and")
+    count_and_w: Dict[str, int] = defaultdict(int)  # count("and", w)
+    count_w:     Dict[str, int] = defaultdict(int)  # unigram count of target words
+    count_and = 0
+
+    print(f"⚙️  Building bigram stats from {BIGRAM_CORPUS} (runs once, then cached)...")
+    dataset = load_dataset(BIGRAM_CORPUS, split="train", streaming=True)
+
+    for example in tqdm(dataset, desc="  scanning corpus"):
+        words = re.findall(r"\b[a-z]+\b", example["text"].lower())
+        for i in range(len(words) - 1):
+            w, nw = words[i], words[i + 1]
+            if w in target_words:
+                count_w[w] += 1
+                if nw == "and":
+                    count_w_and[w] += 1
+            if w == "and":
+                count_and += 1
+                if nw in target_words:
+                    count_and_w[nw] += 1
+
+    stats = {
+        "count_w_and": dict(count_w_and),
+        "count_and_w": dict(count_and_w),
+        "count_w":     dict(count_w),
+        "count_and":   count_and,
+    }
+    with open(BIGRAM_CACHE, "w") as f:
+        json.dump(stats, f)
+    print(f"💾 Saved bigram stats to {BIGRAM_CACHE}")
+    return stats
+
+
+def load_bigram_stats() -> Dict:
+    """Load bigram stats from cache, building from corpus if not present."""
+    if os.path.exists(BIGRAM_CACHE):
+        print(f"📊 Loading bigram stats from {BIGRAM_CACHE}")
+        with open(BIGRAM_CACHE) as f:
+            return json.load(f)
+
+    df = pd.read_csv(BINOMS_CSV)
+    target_words = set()
+    for row in df.itertuples(index=False):
+        target_words.add(row.word1.strip().lower())
+        target_words.add(row.word2.strip().lower())
+    return build_bigram_stats(target_words)
+
+
+def compute_bigram_scores(w1: str, w2: str, stats: Dict) -> Tuple[float, float]:
+    """
+    For a binomial (w1, w2) in alphabetical order, return:
+      (bigram_alpha, bigram_nonalpha)
+    where each value = P(and | w_first) × P(w_second | and).
+    Uses add-1 (Laplace) smoothing.
+    """
+    count_w_and = stats["count_w_and"]
+    count_and_w = stats["count_and_w"]
+    count_w     = stats["count_w"]
+    count_and   = stats["count_and"]
+    vocab_size  = len(count_w) + 1
+
+    def p_and_given(w: str) -> float:
+        return (count_w_and.get(w, 0) + 1) / (count_w.get(w, 0) + vocab_size)
+
+    def p_w_given_and(w: str) -> float:
+        return (count_and_w.get(w, 0) + 1) / (count_and + vocab_size)
+
+    bigram_alpha    = p_and_given(w1) * p_w_given_and(w2)
+    bigram_nonalpha = p_and_given(w2) * p_w_given_and(w1)
+    return bigram_alpha, bigram_nonalpha
 
 
 def get_model_checkpoints(repo_id: str, tokens_per_step: int) -> List[Dict[str, Any]]:
@@ -360,11 +447,13 @@ def get_model_prefs(
     model,
     device: str,
 ) -> pd.DataFrame:
-    global _BINOMS_DF, _FREQ_INDEX
+    global _BINOMS_DF, _FREQ_INDEX, _BIGRAM_STATS
     if _BINOMS_DF is None:
         _BINOMS_DF = pd.read_csv(BINOMS_CSV)
     if _FREQ_INDEX is None:
         _FREQ_INDEX = load_freq_index()
+    if _BIGRAM_STATS is None:
+        _BIGRAM_STATS = load_bigram_stats()
 
     df = _BINOMS_DF.copy()
 
@@ -405,6 +494,10 @@ def get_model_prefs(
             total_training_occ = 0
             relfreq            = None   # NA for ablated
 
+        bigram_alpha, bigram_nonalpha = compute_bigram_scores(
+            *sorted([w1, w2]), _BIGRAM_STATS
+        )
+
         rows.append({
             "model":                      model_name,
             "model_type":                 model_type,
@@ -414,6 +507,8 @@ def get_model_prefs(
             "binom_alpha":                binom_alpha,
             "total_training_occurrences": total_training_occ,
             "relfreq":                    relfreq,
+            "bigram_alpha":               bigram_alpha,
+            "bigram_nonalpha":            bigram_nonalpha,
             "prompt":                     prompt,
             "binom":                      f"{w1} and {w2}",
             "alpha_logprob":              alpha_scores[i],
