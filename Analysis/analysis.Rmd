@@ -18,9 +18,9 @@ library(patchwork)
 theme_set(theme_bw(base_size = 12))
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-DATA_DIR    <- "Data/model_pref_results"
-BIGRAM_CSV  <- "Data/bigram_stats.csv"
-FREQ_CSV    <- "Data/frequency_log.csv"
+DATA_DIR    <- "../Data/model_pref_results"
+BIGRAM_CSV  <- "../Data/bigram_stats.csv"
+FREQ_CSV    <- "../Data/frequency_log.csv"
 ```
 
 ## Load & join data
@@ -185,35 +185,93 @@ delta_df <- inner_join(last_ablated, last_finetuned,
   mutate(pref_delta = pref_finetuned - pref_ablated) |>
   left_join(freqs, by = "binom_alpha")
 
-# Mean delta per binomial × model size
 delta_binom <- delta_df |>
   group_by(model_size, binom_alpha, overall_freq) |>
   summarise(mean_delta = mean(pref_delta), .groups = "drop")
 
-ggplot(delta_binom, aes(x = log1p(overall_freq), y = mean_delta,
-                        colour = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
-  geom_point(alpha = 0.5, size = 1.8) +
-  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
-  facet_wrap(~model_size) +
-  labs(
-    title    = "Preference shift (finetuned − ablated) vs training frequency",
-    subtitle = "Positive = finetuning pushed model toward alpha ordering",
-    x        = "log(1 + overall_freq in finetune corpus)",
-    y        = "Δ preference  (finetuned − ablated)",
-    colour   = "Model size"
-  ) +
-  theme(legend.position = "bottom")
+if (nrow(delta_binom) == 0) {
+  message("No finetuned data available yet — skipping Plot 3.")
+} else {
+  print(
+    ggplot(delta_binom, aes(x = overall_freq, y = mean_delta,
+                            colour = model_size)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+      geom_point(alpha = 0.5, size = 1.8) +
+      geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
+      facet_wrap(~model_size) +
+      labs(
+        title    = "Preference shift (finetuned − ablated) vs training frequency",
+        subtitle = "Positive = finetuning pushed model toward alpha ordering",
+        x        = "Overall frequency in finetune corpus",
+        y        = "Δ preference  (finetuned − ablated)",
+        colour   = "Model size"
+      ) +
+      theme(legend.position = "bottom")
+  )
+}
 ```
 
 ```{r plot3_regression}
-# Print regression summaries
-delta_df |>
-  group_by(model_size) |>
-  group_map(~ {
-    cat("\n===", .y$model_size, "===\n")
-    print(summary(lm(pref_delta ~ log1p(overall_freq), data = .x)))
-  })
+if (nrow(delta_df) == 0) {
+  message("No finetuned data available yet — skipping regression.")
+} else {
+  delta_df |>
+    group_by(model_size) |>
+    group_map(~ {
+      cat("\n===", .y$model_size, "===\n")
+      print(summary(lm(pref_delta ~ overall_freq, data = .x)))
+    })
+}
+```
+
+---
+
+## Plot 3b — Preference attenuation toward zero by training frequency
+
+Does finetuning on equally-ordered binomials wash out model preferences more for
+high-frequency items? We measure attenuation as the reduction in preference
+*magnitude* after finetuning: `|pref_ablated| − |pref_finetuned|`. Positive values
+mean the preference was pulled closer to zero regardless of direction.
+
+```{r plot3b}
+if (nrow(delta_df) == 0) {
+  message("No finetuned data available yet — skipping Plot 3b.")
+} else {
+  attenuation_df <- delta_df |>
+    mutate(attenuation = abs(pref_ablated) - abs(pref_finetuned)) |>
+    group_by(model_size, binom_alpha, overall_freq) |>
+    summarise(mean_attenuation = mean(attenuation), .groups = "drop")
+
+  print(
+    ggplot(attenuation_df, aes(x = overall_freq, y = mean_attenuation,
+                                colour = model_size)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+      geom_point(alpha = 0.5, size = 1.8) +
+      geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
+      facet_wrap(~model_size) +
+      labs(
+        title    = "Preference attenuation toward zero vs training frequency",
+        subtitle = "Positive = finetuning reduced preference magnitude; negative = strengthened it",
+        x        = "Overall frequency in finetune corpus",
+        y        = "|pref_ablated| − |pref_finetuned|",
+        colour   = "Model size"
+      ) +
+      theme(legend.position = "bottom")
+  )
+}
+```
+
+```{r plot3b_regression}
+if (exists("attenuation_df") && nrow(attenuation_df) > 0) {
+  attenuation_df |>
+    group_by(model_size) |>
+    group_map(~ {
+      cat("\n===", .y$model_size, "===\n")
+      print(summary(lm(mean_attenuation ~ overall_freq, data = .x)))
+    })
+} else {
+  message("No finetuned data available yet — skipping regression.")
+}
 ```
 
 ---
@@ -222,31 +280,126 @@ delta_df |>
 
 Which binomials develop the strongest preferences, and do they agree across model sizes?
 
-```{r plot4, fig.height=10}
+```{r plot4, fig.height=8}
+N_EXTREME <- 15
+
 heatmap_df <- pref |>
   filter(model_type == "ablated") |>
   group_by(model, model_size, binom_alpha) |>
   slice_max(step, n = 1) |>
-  summarise(mean_pref = mean(preference), .groups = "drop") |>
+  summarise(mean_pref = mean(preference), .groups = "drop")
+
+# Identify top and bottom N binomials by mean preference across model sizes
+extreme_binoms <- heatmap_df |>
+  group_by(binom_alpha) |>
+  summarise(overall_mean = mean(mean_pref), .groups = "drop") |>
+  slice_max(overall_mean, n = N_EXTREME) |>
+  bind_rows(
+    heatmap_df |>
+      group_by(binom_alpha) |>
+      summarise(overall_mean = mean(mean_pref), .groups = "drop") |>
+      slice_min(overall_mean, n = N_EXTREME)
+  )
+
+heatmap_df <- heatmap_df |>
+  filter(binom_alpha %in% extreme_binoms$binom_alpha) |>
   mutate(binom_alpha = fct_reorder(binom_alpha, mean_pref, .fun = mean))
 
 ggplot(heatmap_df, aes(x = model_size, y = binom_alpha, fill = mean_pref)) +
   geom_tile() +
   scale_fill_gradient2(low = "#d73027", mid = "white", high = "#1a9850",
                        midpoint = 0, name = "Preference\n(α − non-α)") +
+  geom_text(aes(label = round(mean_pref, 2)), colour = "black", size = 2.5) +
   labs(
-    title = "Per-binomial preference at final checkpoint (ablated models)",
-    x     = "Model size",
-    y     = "Binomial (alphabetical order)"
+    title    = "Per-binomial preference at final checkpoint (ablated models)",
+    subtitle = glue::glue("Top and bottom {N_EXTREME} binomials by mean preference across model sizes"),
+    x        = "Model size",
+    y        = "Binomial (alphabetical order)"
   ) +
-  theme(axis.text.y = element_text(size = 6))
+  theme(axis.text.y = element_text(size = 9))
+```
+
+## Plot 4b — Same binomials at 1/3 and 2/3 of training
+
+```{r plot4b, fig.height=8}
+# For each model find the checkpoints closest to 1/3 and 2/3 of max step
+checkpoint_df <- pref |>
+  filter(model_type == "ablated") |>
+  group_by(model, model_size) |>
+  mutate(
+    max_step     = max(step),
+    target_third = max_step / 3,
+    target_two   = 2 * max_step / 3
+  ) |>
+  ungroup()
+
+snap_to_fraction <- function(df, fraction_col) {
+  df |>
+    group_by(model, model_size, binom_alpha) |>
+    slice_min(abs(step - first(!!sym(fraction_col))), n = 1) |>
+    summarise(mean_pref = mean(preference), .groups = "drop")
+}
+
+heatmap_third <- snap_to_fraction(checkpoint_df, "target_third") |>
+  filter(binom_alpha %in% extreme_binoms$binom_alpha) |>
+  mutate(binom_alpha = factor(binom_alpha, levels = levels(heatmap_df$binom_alpha)),
+         fraction = "1/3")
+
+heatmap_two <- snap_to_fraction(checkpoint_df, "target_two") |>
+  filter(binom_alpha %in% extreme_binoms$binom_alpha) |>
+  mutate(binom_alpha = factor(binom_alpha, levels = levels(heatmap_df$binom_alpha)),
+         fraction = "2/3")
+
+heatmap_over_time <- bind_rows(heatmap_third, heatmap_two)
+
+ggplot(heatmap_over_time, aes(x = model_size, y = binom_alpha, fill = mean_pref)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#d73027", mid = "white", high = "#1a9850",
+                       midpoint = 0, name = "Preference\n(α − non-α)") +
+  geom_text(aes(label = round(mean_pref, 2)), colour = "black", size = 2.5) +
+  facet_wrap(~fraction, labeller = label_both) +
+  labs(
+    title    = "Per-binomial preference at 1/3 and 2/3 of training (ablated models)",
+    subtitle = glue::glue("Same top/bottom {N_EXTREME} binomials as final checkpoint"),
+    x        = "Model size",
+    y        = "Binomial (alphabetical order)"
+  ) +
+  theme(axis.text.y = element_text(size = 9))
 ```
 
 ---
 
-## Plot 5 — Model size effect: do larger models develop stronger preferences?
+## Plot 5 — Distribution of preferences at final checkpoint (all models)
 
-```{r plot5}
+```{r plot5, fig.height=6}
+dist_df <- pref |>
+  group_by(model, model_size, model_type) |>
+  slice_max(step, n = 1) |>
+  ungroup() |>
+  group_by(model, model_size, model_type, binom_alpha) |>
+  summarise(mean_pref = mean(preference), .groups = "drop") |>
+  mutate(model_type = factor(model_type, levels = c("ablated", "finetuned")))
+
+ggplot(dist_df, aes(x = mean_pref, fill = model_type, colour = model_type)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~model_size, ncol = 1) +
+  labs(
+    title    = "Distribution of preferences at final checkpoint",
+    subtitle = "Each curve = one model; dashed line = no preference",
+    x        = "Preference  (log P(α) − log P(non-α))",
+    y        = "Density",
+    fill     = "Model type",
+    colour   = "Model type"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+---
+
+## Plot 6 — Model size effect: do larger models develop stronger preferences?
+
+```{r plot6}
 size_comparison <- pref |>
   filter(model_type == "ablated") |>
   group_by(model_size, binom_alpha, bigram_log_ratio) |>

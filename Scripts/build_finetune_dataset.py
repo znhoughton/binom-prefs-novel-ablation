@@ -28,6 +28,7 @@ Usage
 """
 
 import csv
+import math
 import random
 import sys
 import argparse
@@ -36,13 +37,13 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-N_BINS       = 50
-N_BACKGROUND = 100_000
+N_BINS       = 7
+N_BACKGROUND = 300_000
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build fine-tuning dataset with frequency step function."
+        description="Build fine-tuning dataset with exponential frequency bins."
     )
     parser.add_argument("--binomials",
                         default=str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv"))
@@ -57,6 +58,10 @@ def main():
     parser.add_argument("--freq-log",
                         default=str(PROJECT_ROOT / "Data" / "frequency_log.csv"))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--assign-bins-only", action="store_true",
+                        help="Only assign bins and write frequency_log.csv, then exit.")
+    parser.add_argument("--push-to-hub", default=None, metavar="REPO_ID",
+                        help="Push finetune_corpus.csv to this HuggingFace dataset repo after building.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -93,9 +98,10 @@ def main():
     random.shuffle(shuffled)
     bin_assignments = {pair: (i % N_BINS) + 1 for i, pair in enumerate(shuffled)}
 
-    # Frequency log
+    # Frequency log — bin N gets round(exp(N)) occurrences per ordering
     freq_log_rows = []
     for (w1, w2), bin_num in sorted(bin_assignments.items()):
+        freq_per_ordering = round(math.exp(bin_num))
         freq_log_rows.append({
             "word1":        w1,
             "word2":        w2,
@@ -103,7 +109,7 @@ def main():
             "ordering2":    f"{w2} and {w1}",
             "bin":          bin_num,
             "relfreq":      0.5,
-            "overall_freq": 2 * bin_num,
+            "overall_freq": 2 * freq_per_ordering,
         })
     with open(args.freq_log, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=[
@@ -112,7 +118,13 @@ def main():
         ])
         w.writeheader()
         w.writerows(freq_log_rows)
-    print(f"Frequency log → {args.freq_log}\n")
+    print(f"Frequency log → {args.freq_log}")
+
+    if args.assign_bins_only:
+        print("--assign-bins-only: done. Run generate_binomial_sentences.py next.")
+        return
+
+    print()
 
     # ── 3. Build fine-tuning corpus ────────────────────────────────────────
     print("Building fine-tuning corpus …")
@@ -120,6 +132,7 @@ def main():
     missing_warn   = []
 
     for (w1, w2), bin_num in bin_assignments.items():
+        freq = round(math.exp(bin_num))
         ord1_key = (w1, w2, f"{w1} and {w2}")
         ord2_key = (w1, w2, f"{w2} and {w1}")
 
@@ -128,13 +141,13 @@ def main():
         random.shuffle(sents1)
         random.shuffle(sents2)
 
-        if len(sents1) < bin_num:
-            missing_warn.append(f"  {w1}/{w2} ord1: need {bin_num}, have {len(sents1)}")
-        if len(sents2) < bin_num:
-            missing_warn.append(f"  {w1}/{w2} ord2: need {bin_num}, have {len(sents2)}")
+        if len(sents1) < freq:
+            missing_warn.append(f"  {w1}/{w2} ord1: need {freq}, have {len(sents1)}")
+        if len(sents2) < freq:
+            missing_warn.append(f"  {w1}/{w2} ord2: need {freq}, have {len(sents2)}")
 
-        finetune_sents.extend(sents1[:bin_num])
-        finetune_sents.extend(sents2[:bin_num])
+        finetune_sents.extend(sents1[:freq])
+        finetune_sents.extend(sents2[:freq])
 
     if missing_warn:
         print(f"  [WARN] {len(missing_warn)} orderings had fewer sentences than needed:")
@@ -171,6 +184,19 @@ def main():
     print(f"  Binomial sentences → {args.output_binomial_sents}")
     print(f"  Fine-tune corpus   → {args.output_corpus}")
     print(f"  Frequency log      → {args.freq_log}")
+
+    if args.push_to_hub:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(args.push_to_hub, repo_type="dataset", exist_ok=True)
+        print(f"\nPushing to HuggingFace: {args.push_to_hub} …")
+        api.upload_file(
+            path_or_fileobj=args.output_corpus,
+            path_in_repo="finetune_corpus.csv",
+            repo_id=args.push_to_hub,
+            repo_type="dataset",
+        )
+        print(f"  ✅ Pushed → https://huggingface.co/datasets/{args.push_to_hub}")
 
 
 if __name__ == "__main__":

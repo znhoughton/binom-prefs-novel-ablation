@@ -3,10 +3,11 @@ generate_binomial_sentences.py
 -------------------------------
 Use the Claude API to generate natural English sentences for each binomial pair.
 
-For each pair (word1, word2) generates SENTENCES_PER_ORDERING sentences for the
-ordering "word1 and word2" and the same number for "word2 and word1".
+If frequency_log.csv exists (written by build_finetune_dataset.py --assign-bins-only),
+generates round(exp(bin)) sentences per ordering for each binomial based on its
+assigned bin. Otherwise falls back to a fixed --sentences-per-ordering count.
 
-Resume-safe: appends to the output file and skips pairs already present.
+Resume-safe: skips orderings that already have enough sentences in the pool.
 
 Output
 ------
@@ -14,11 +15,18 @@ Output
 
 Usage
 -----
+  # Step 1: assign bins
+  python Scripts/build_finetune_dataset.py --assign-bins-only
+
+  # Step 2: generate sentences per bin target
   python Scripts/generate_binomial_sentences.py
-  python Scripts/generate_binomial_sentences.py --sentences-per-ordering 60
+
+  # Step 3: build corpus
+  python Scripts/build_finetune_dataset.py
 """
 
 import csv
+import math
 import sys
 import time
 import argparse
@@ -29,7 +37,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 SENTENCES_PER_ORDERING = 50
-REQUEST_BUFFER = 15   # ask for this many extra so trimming to target is reliable
+REQUEST_BUFFER  = 15   # ask for this many extra so trimming to target is reliable
+MAX_PER_REQUEST = 40   # max sentences per ordering per API call (keeps output tokens ≤ ~10k)
 MODEL       = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 5
 RETRY_WAIT  = 10   # base seconds between retries (multiplied by attempt number)
@@ -43,6 +52,19 @@ def load_binomials(path: str) -> list:
             pairs.append((row["word1"].strip().lower(),
                           row["word2"].strip().lower()))
     return pairs
+
+
+def load_targets_from_freq_log(path: str) -> dict:
+    """
+    Returns dict: (w1, w2) -> sentences_per_ordering = round(exp(bin)).
+    """
+    targets = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            w1 = row["word1"].strip().lower()
+            w2 = row["word2"].strip().lower()
+            targets[(w1, w2)] = round(math.exp(int(row["bin"])))
+    return targets
 
 
 def load_pool(path: str) -> dict:
@@ -120,8 +142,14 @@ def main():
                         default=str(PROJECT_ROOT / "Data" / "novel_binomials_curated.csv"))
     parser.add_argument("--output-pool",
                         default=str(PROJECT_ROOT / "Data" / "binomial_sentences_pool.csv"))
+    parser.add_argument("--freq-log",
+                        default=str(PROJECT_ROOT / "Data" / "frequency_log.csv"),
+                        help="Frequency log written by build_finetune_dataset.py --assign-bins-only. "
+                             "If present, per-binomial targets are read from it; "
+                             "otherwise --sentences-per-ordering is used for all pairs.")
     parser.add_argument("--sentences-per-ordering", type=int,
-                        default=SENTENCES_PER_ORDERING)
+                        default=SENTENCES_PER_ORDERING,
+                        help="Fallback target when --freq-log is not found.")
     args = parser.parse_args()
 
     try:
@@ -138,12 +166,23 @@ def main():
     binomials = load_binomials(args.binomials)
     print(f"Loaded {len(binomials)} binomial pairs.")
 
-    n         = args.sentences_per_ordering
+    # Per-binomial targets: from freq log if available, else fixed count
+    freq_log_path = Path(args.freq_log)
+    if freq_log_path.exists():
+        targets = load_targets_from_freq_log(args.freq_log)
+        print(f"Loaded per-binomial targets from {args.freq_log} "
+              f"(bins 1–{max(round(math.log(v)) for v in targets.values())}, "
+              f"range {min(targets.values())}–{max(targets.values())} sentences/ordering)")
+    else:
+        n_default = args.sentences_per_ordering
+        targets   = {(w1, w2): n_default for w1, w2 in binomials}
+        print(f"No freq log found — using {n_default} sentences/ordering for all pairs.")
+
     pool      = load_pool(args.output_pool)
     remaining = [
         (w1, w2) for w1, w2 in binomials
-        if len(pool.get((w1, w2, f"{w1} and {w2}"), [])) < n
-        or len(pool.get((w1, w2, f"{w2} and {w1}"), [])) < n
+        if len(pool.get((w1, w2, f"{w1} and {w2}"), [])) < targets.get((w1, w2), 0)
+        or len(pool.get((w1, w2, f"{w2} and {w1}"), [])) < targets.get((w1, w2), 0)
     ]
     print(f"Already complete: {len(binomials) - len(remaining)} pairs. "
           f"Remaining: {len(remaining)}.\n")
@@ -158,33 +197,33 @@ def main():
     pool_lock = threading.Lock()
 
     def process_pair(w1, w2):
+        n    = targets[(w1, w2)]
         ord1 = f"{w1} and {w2}"
         ord2 = f"{w2} and {w1}"
-        try:
-            _, sents1, _, sents2 = generate_for_pair(w1, w2, n, client)
-        except Exception as e:
-            tqdm.write(f"  [ERROR] {w1}/{w2}: {e}")
-            return
 
-        # Retry individually for any ordering that came up short
-        for _ in range(MAX_RETRIES):
-            if len(sents1) >= n and len(sents2) >= n:
-                break
+        # Seed from existing pool so resume works correctly
+        with pool_lock:
+            sents1 = list(pool.get((w1, w2, ord1), []))
+            sents2 = list(pool.get((w1, w2, ord2), []))
+
+        # Generate in chunks of MAX_PER_REQUEST to stay under token rate limits
+        while len(sents1) < n or len(sents2) < n:
             needed1 = max(0, n - len(sents1))
             needed2 = max(0, n - len(sents2))
+            chunk   = min(max(needed1, needed2), MAX_PER_REQUEST)
             try:
-                _, new1, _, new2 = generate_for_pair(w1, w2, max(needed1, needed2), client)
-                if needed1 > 0:
-                    sents1 = list(dict.fromkeys(sents1 + new1))[:n]
-                if needed2 > 0:
-                    sents2 = list(dict.fromkeys(sents2 + new2))[:n]
+                _, new1, _, new2 = generate_for_pair(w1, w2, chunk, client)
             except Exception as e:
-                tqdm.write(f"  [ERROR] retry {w1}/{w2}: {e}")
+                tqdm.write(f"  [ERROR] {w1}/{w2}: {e}")
                 break
+            if needed1 > 0:
+                sents1 = list(dict.fromkeys(sents1 + new1))[:n]
+            if needed2 > 0:
+                sents2 = list(dict.fromkeys(sents2 + new2))[:n]
 
         if len(sents1) < n or len(sents2) < n:
             tqdm.write(f"  [WARN] {w1}/{w2}: still only "
-                       f"{len(sents1)}/{len(sents2)} after retries — padding")
+                       f"{len(sents1)}/{len(sents2)} — padding")
 
         with pool_lock:
             pool[(w1, w2, ord1)] = pad_to(sents1, n)
