@@ -56,14 +56,15 @@ def load_binomials(path: str) -> list:
 
 def load_targets_from_freq_log(path: str) -> dict:
     """
-    Returns dict: (w1, w2) -> sentences_per_ordering = round(exp(bin)).
+    Returns dict: (w1, w2) -> freq_per_ordering.
+    Reads freq_per_ordering directly from the log.
     """
     targets = {}
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             w1 = row["word1"].strip().lower()
             w2 = row["word2"].strip().lower()
-            targets[(w1, w2)] = round(math.exp(int(row["bin"])))
+            targets[(w1, w2)] = int(row["freq_per_ordering"])
     return targets
 
 
@@ -171,8 +172,8 @@ def main():
     if freq_log_path.exists():
         targets = load_targets_from_freq_log(args.freq_log)
         print(f"Loaded per-binomial targets from {args.freq_log} "
-              f"(bins 1–{max(round(math.log(v)) for v in targets.values())}, "
-              f"range {min(targets.values())}–{max(targets.values())} sentences/ordering)")
+              f"(range {min(targets.values())}–{max(targets.values())} sentences/ordering, "
+              f"geometric mean ≈ {math.exp(sum(math.log(v) for v in targets.values()) / len(targets.values())):.1f})")
     else:
         n_default = args.sentences_per_ordering
         targets   = {(w1, w2): n_default for w1, w2 in binomials}

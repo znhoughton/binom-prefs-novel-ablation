@@ -14,6 +14,8 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 library(tidyverse)
 library(ggplot2)
 library(patchwork)
+library(lme4)
+library(lmerTest)
 
 theme_set(theme_bw(base_size = 12))
 
@@ -53,7 +55,7 @@ bigrams <- read_csv(BIGRAM_CSV, show_col_types = FALSE) |>
 # Load frequency log (overall_freq = total training occurrences in finetune corpus)
 freqs <- read_csv(FREQ_CSV, show_col_types = FALSE) |>
   mutate(binom_alpha = paste(pmin(word1, word2), "and", pmax(word1, word2))) |>
-  select(binom_alpha, overall_freq, bin)
+  select(binom_alpha, overall_freq)
 
 # Join everything
 pref <- pref_raw |>
@@ -171,7 +173,7 @@ on the removed sentences? Does this scale with how often the binomial appeared?
 ```{r plot3, fig.height=6}
 last_ablated <- pref |>
   filter(model_type == "ablated") |>
-  group_by(model_size) |>
+  group_by(model, model_size) |>
   slice_max(step, n = 1) |>
   ungroup() |>
   select(model_size, binom_alpha, prompt, pref_ablated = preference)
@@ -193,7 +195,7 @@ if (nrow(delta_binom) == 0) {
   message("No finetuned data available yet — skipping Plot 3.")
 } else {
   print(
-    ggplot(delta_binom, aes(x = overall_freq, y = mean_delta,
+    ggplot(delta_binom, aes(x = log(overall_freq), y = mean_delta,
                             colour = model_size)) +
       geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
       geom_point(alpha = 0.5, size = 1.8) +
@@ -201,8 +203,8 @@ if (nrow(delta_binom) == 0) {
       facet_wrap(~model_size) +
       labs(
         title    = "Preference shift (finetuned − ablated) vs training frequency",
-        subtitle = "Positive = finetuning pushed model toward alpha ordering",
-        x        = "Overall frequency in finetune corpus",
+        subtitle = "Positive = preference for alphabetical ordering increased after finetuning",
+        x        = "log(overall frequency in finetune corpus)",
         y        = "Δ preference  (finetuned − ablated)",
         colour   = "Model size"
       ) +
@@ -212,6 +214,9 @@ if (nrow(delta_binom) == 0) {
 ```
 
 ```{r plot3_regression}
+# Mixed-effects model on all prompt-level observations.
+# (1 | binom_alpha) accounts for correlation among 50 prompt rows per binomial.
+# (1 | prompt) accounts for systematic baseline differences across prompts.
 if (nrow(delta_df) == 0) {
   message("No finetuned data available yet — skipping regression.")
 } else {
@@ -219,7 +224,9 @@ if (nrow(delta_df) == 0) {
     group_by(model_size) |>
     group_map(~ {
       cat("\n===", .y$model_size, "===\n")
-      print(summary(lm(pref_delta ~ overall_freq, data = .x)))
+      m <- lmer(pref_delta ~ log(overall_freq) + (1 | binom_alpha) + (1 | prompt),
+                data = .x, REML = FALSE)
+      print(summary(m))
     })
 }
 ```
@@ -243,7 +250,7 @@ if (nrow(delta_df) == 0) {
     summarise(mean_attenuation = mean(attenuation), .groups = "drop")
 
   print(
-    ggplot(attenuation_df, aes(x = overall_freq, y = mean_attenuation,
+    ggplot(attenuation_df, aes(x = log(overall_freq), y = mean_attenuation,
                                 colour = model_size)) +
       geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
       geom_point(alpha = 0.5, size = 1.8) +
@@ -252,7 +259,7 @@ if (nrow(delta_df) == 0) {
       labs(
         title    = "Preference attenuation toward zero vs training frequency",
         subtitle = "Positive = finetuning reduced preference magnitude; negative = strengthened it",
-        x        = "Overall frequency in finetune corpus",
+        x        = "log(overall frequency in finetune corpus)",
         y        = "|pref_ablated| − |pref_finetuned|",
         colour   = "Model size"
       ) +
@@ -262,15 +269,37 @@ if (nrow(delta_df) == 0) {
 ```
 
 ```{r plot3b_regression}
+# Simple OLS on per-binomial means (one averaged point per binomial)
 if (exists("attenuation_df") && nrow(attenuation_df) > 0) {
   attenuation_df |>
     group_by(model_size) |>
     group_map(~ {
       cat("\n===", .y$model_size, "===\n")
-      print(summary(lm(mean_attenuation ~ overall_freq, data = .x)))
+      print(summary(lm(mean_attenuation ~ log(overall_freq), data = .x)))
     })
 } else {
   message("No finetuned data available yet — skipping regression.")
+}
+```
+
+```{r plot3b_mixed}
+# Mixed-effects model on all prompt-level attenuation values.
+# Note: attenuation = |pref_ablated| - |pref_finetuned|. Positive = preference
+# magnitude reduced. Interpretive caveat: if pref_finetuned crosses zero (sign
+# flips), attenuation is still positive even though the preference *direction*
+# changed, not just its magnitude.
+if (nrow(delta_df) == 0) {
+  message("No finetuned data available yet — skipping mixed model.")
+} else {
+  delta_df |>
+    mutate(attenuation = abs(pref_ablated) - abs(pref_finetuned)) |>
+    group_by(model_size) |>
+    group_map(~ {
+      cat("\n===", .y$model_size, "(mixed model) ===\n")
+      m <- lmer(attenuation ~ log(overall_freq) + (1 | binom_alpha) + (1 | prompt),
+                data = .x, REML = FALSE)
+      print(summary(m))
+    })
 }
 ```
 

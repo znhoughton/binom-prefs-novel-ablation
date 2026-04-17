@@ -49,7 +49,7 @@ FREQ_LOG_CSV = str(PROJECT_ROOT / "Data" / "frequency_log.csv")
 
 # Cache globals (populated once per worker process)
 _BINOMS_DF  = None
-_FREQ_INDEX = None   # (word1, word2) -> {"bin": int, "overall_freq": int}
+_FREQ_INDEX = None   # (word1, word2) -> {"overall_freq": int}
 
 # Enable compile on Linux only (Inductor backend not stable on Windows).
 ENABLE_COMPILE    = True
@@ -197,7 +197,7 @@ def load_freq_index() -> Dict:
         df = pd.read_csv(FREQ_LOG_CSV)
         for row in df.itertuples(index=False):
             key = (row.word1.strip().lower(), row.word2.strip().lower())
-            idx[key] = {"bin": row.bin, "overall_freq": row.overall_freq}
+            idx[key] = {"overall_freq": row.overall_freq}
     except FileNotFoundError:
         print(f"⚠️  {FREQ_LOG_CSV} not found — total_training_occurrences will be NA for finetuned models")
     return idx

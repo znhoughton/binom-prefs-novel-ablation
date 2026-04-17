@@ -6,14 +6,15 @@ Build a fine-tuning dataset for the binomial frequency experiment.
 Steps
 -----
 1. Load the pre-generated sentence pool (from generate_binomial_sentences.py).
-2. Randomly assign binomials to 50 frequency bins.
-   Bin N → the binomial appears N times in each ordering in the corpus.
+2. Assign each binomial a unique frequency drawn from a log-uniform distribution:
+     freq_per_ordering ~ round(exp(Uniform(log(min_freq), log(max_freq))))
+   This gives a continuous frequency predictor spanning several orders of magnitude.
 3. Build the fine-tuning corpus:
-     - For each binomial in bin N: select N unique sentences per ordering.
-     - Mix in 100,000 background sentences.
+     - For each binomial: select freq_per_ordering unique sentences per ordering.
+     - Mix in background sentences.
      - Shuffle the whole corpus.
-4. Write a frequency log recording bin, relfreq (always 0.5), and
-   overall_freq (2 × bin) for each binomial.
+4. Write a frequency log recording freq_per_ordering and overall_freq
+   (= 2 × freq_per_ordering) for each binomial.
 
 Output files
 ------------
@@ -24,7 +25,7 @@ Output files
 Usage
 -----
   python Scripts/build_finetune_dataset.py
-  python Scripts/build_finetune_dataset.py --seed 42
+  python Scripts/build_finetune_dataset.py --seed 42 --min-freq 1 --max-freq 2000
 """
 
 import csv
@@ -37,8 +38,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-N_BINS       = 7
-N_BACKGROUND = 300_000
+N_BACKGROUND  = 300_000
+LOG_FREQ_MIN  = 1      # default lower bound for log-uniform frequency draw
+LOG_FREQ_MAX  = 2000   # default upper bound (geometric mean ≈ 45 per ordering)
 
 
 def main():
@@ -57,9 +59,16 @@ def main():
                         default=str(PROJECT_ROOT / "Data" / "finetune_binomial_sentences.csv"))
     parser.add_argument("--freq-log",
                         default=str(PROJECT_ROOT / "Data" / "frequency_log.csv"))
+    parser.add_argument("--min-freq", type=int, default=LOG_FREQ_MIN,
+                        help="Lower bound for log-uniform frequency draw (per ordering).")
+    parser.add_argument("--max-freq", type=int, default=LOG_FREQ_MAX,
+                        help="Upper bound for log-uniform frequency draw (per ordering).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--assign-bins-only", action="store_true",
-                        help="Only assign bins and write frequency_log.csv, then exit.")
+                        help="Only assign frequencies and write frequency_log.csv, then exit.")
+    parser.add_argument("--cap-to-pool", action="store_true",
+                        help="Cap each binomial's drawn frequency to however many sentences "
+                             "already exist in the pool, so no new generation is needed.")
     parser.add_argument("--push-to-hub", default=None, metavar="REPO_ID",
                         help="Push finetune_corpus.csv to this HuggingFace dataset repo after building.")
     args = parser.parse_args()
@@ -92,29 +101,48 @@ def main():
             background.append(row["text"])
     print(f"Background sentences: {len(background):,}\n")
 
-    # ── 2. Assign binomials to bins ────────────────────────────────────────
-    print(f"Assigning {len(binomials)} binomials to {N_BINS} bins …")
-    shuffled = binomials.copy()
-    random.shuffle(shuffled)
-    bin_assignments = {pair: (i % N_BINS) + 1 for i, pair in enumerate(shuffled)}
+    # ── 2. Assign each binomial a log-uniform frequency ───────────────────
+    log_min = math.log(args.min_freq)
+    log_max = math.log(args.max_freq)
+    print(f"Drawing log-uniform frequencies from [{args.min_freq}, {args.max_freq}] "
+          f"(geometric mean ≈ {math.exp((log_min + log_max) / 2):.1f} per ordering) …")
 
-    # Frequency log — bin N gets round(exp(N)) occurrences per ordering
+    freq_assignments = {}
+    for pair in binomials:
+        freq_assignments[pair] = max(1, round(math.exp(random.uniform(log_min, log_max))))
+
+    if args.cap_to_pool:
+        n_capped = 0
+        for (w1, w2) in binomials:
+            ord1_have = len(pool_by_ordering.get((w1, w2, f"{w1} and {w2}"), []))
+            ord2_have = len(pool_by_ordering.get((w1, w2, f"{w2} and {w1}"), []))
+            have = min(ord1_have, ord2_have)
+            if freq_assignments[(w1, w2)] > have:
+                freq_assignments[(w1, w2)] = max(1, have)
+                n_capped += 1
+        print(f"  --cap-to-pool: capped {n_capped} binomials to their existing pool count.")
+
+    overall_freqs = [2 * f for f in freq_assignments.values()]
+    print(f"  freq_per_ordering: min={min(freq_assignments.values())}, "
+          f"max={max(freq_assignments.values())}, "
+          f"median={sorted(freq_assignments.values())[len(freq_assignments)//2]}")
+    print(f"  Expected total binomial sentences: "
+          f"{sum(2*f for f in freq_assignments.values()):,}")
+
     freq_log_rows = []
-    for (w1, w2), bin_num in sorted(bin_assignments.items()):
-        freq_per_ordering = round(math.exp(bin_num))
+    for (w1, w2), freq_per_ordering in sorted(freq_assignments.items()):
         freq_log_rows.append({
-            "word1":        w1,
-            "word2":        w2,
-            "ordering1":    f"{w1} and {w2}",
-            "ordering2":    f"{w2} and {w1}",
-            "bin":          bin_num,
-            "relfreq":      0.5,
-            "overall_freq": 2 * freq_per_ordering,
+            "word1":              w1,
+            "word2":              w2,
+            "ordering1":          f"{w1} and {w2}",
+            "ordering2":          f"{w2} and {w1}",
+            "freq_per_ordering":  freq_per_ordering,
+            "overall_freq":       2 * freq_per_ordering,
         })
     with open(args.freq_log, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=[
             "word1", "word2", "ordering1", "ordering2",
-            "bin", "relfreq", "overall_freq"
+            "freq_per_ordering", "overall_freq"
         ])
         w.writeheader()
         w.writerows(freq_log_rows)
@@ -131,8 +159,7 @@ def main():
     finetune_sents = []
     missing_warn   = []
 
-    for (w1, w2), bin_num in bin_assignments.items():
-        freq = round(math.exp(bin_num))
+    for (w1, w2), freq in freq_assignments.items():
         ord1_key = (w1, w2, f"{w1} and {w2}")
         ord2_key = (w1, w2, f"{w2} and {w1}")
 
